@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -76,7 +76,18 @@ THIS_DIR = Path(__file__).resolve().parent
 STATIC_DIR = THIS_DIR / "static"
 TEMPLATE_PATH = THIS_DIR / "templates" / "index.html"
 
-app = FastAPI(title="视频处理器", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    cleanup_expired_files()
+    ensure_worker()
+    recover_unfinished_jobs()
+    threading.Thread(target=cleanup_worker, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="视频处理器", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -1300,13 +1311,6 @@ def cleanup_worker() -> None:
         time.sleep(3600)
 
 
-@app.on_event("startup")
-def startup() -> None:
-    init_db()
-    cleanup_expired_files()
-    ensure_worker()
-    recover_unfinished_jobs()
-    threading.Thread(target=cleanup_worker, daemon=True).start()
 
 
 @app.get("/", response_class=HTMLResponse)
