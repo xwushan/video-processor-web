@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>视频处理器</title>
+  <link rel="stylesheet" href="/static/app.css?v=20260626-1730">
+</head>
+<body>
+  <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+  <div id="loginDialog" class="login-backdrop" hidden>
+    <form id="loginForm" class="login-card" autocomplete="on">
+      <div>
+        <span class="login-mark">V</span>
+        <h2>登录视频处理器</h2>
+        <p>请输入管理员账号密码后继续使用。</p>
+      </div>
+      <label>账号
+        <input id="loginUser" name="username" type="text" autocomplete="username" required>
+      </label>
+      <label>密码
+        <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <div id="loginError" class="login-error" role="alert"></div>
+      <button type="submit">登录</button>
+    </form>
+  </div>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">V</span>
+        <strong>视频处理器</strong>
+      </div>
+      <nav class="tabs">
+        <button id="processTab" type="button" class="active"><span class="nav-icon nav-icon-process"></span>处理页面</button>
+        <button id="recordsTab" type="button"><span class="nav-icon nav-icon-records"></span>处理记录</button>
+      </nav>
+    </aside>
+
+    <div class="workspace">
+      <header class="workspace-header">
+        <div class="title-line">
+          <h1>视频处理器</h1>
+          <p>内网批量水印与压缩处理，服务器 CPU 编码</p>
+        </div>
+      </header>
+
+      <section id="processPage" class="panel submit-panel page active">
+
+      <form id="jobForm">
+        <div id="lockBanner" class="form-lock-banner">
+          <strong>制作中，参数已锁定</strong>
+          <span>当前任务未完成前，视频列表和水印参数会保持不变，避免处理结果和记录错位。</span>
+        </div>
+        <div id="processingOverlay" class="processing-overlay">
+          <div class="processing-card">
+            <div class="row between">
+              <div>
+                <h2>当前处理进度</h2>
+                <p id="currentStatusText">暂无正在处理的任务</p>
+              </div>
+                <div class="current-actions">
+                  <button id="pauseJobBtn" type="button" class="ghost" disabled>暂停</button>
+                  <button id="resumeJobBtn" type="button" disabled>继续</button>
+                  <button id="cancelJobBtn" type="button" class="danger" disabled>取消任务</button>
+                </div>
+            </div>
+            <div class="current-grid">
+              <div class="progress-ring">
+                <span id="currentProgressText">0%</span>
+              </div>
+              <div>
+                <div class="bar current-bar"><i id="currentProgressBar"></i></div>
+                <div id="currentJobMeta" class="current-meta">总任务：0　已处理：0/0　任务数：-</div>
+                <div id="currentResourceMeta" class="current-resource-meta">资源状态：等待任务启动</div>
+                <div id="currentFiles" class="current-files"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="process-layout">
+        <section class="sub-panel video-panel">
+          <div class="row between">
+            <div class="section-heading">
+              <h2>1. 视频文件</h2>
+              <p id="selectedSummary">选择后会先在这里展示待处理列表，确认参数后再开始上传制作</p>
+            </div>
+            <div class="section-actions">
+              <button id="clearVideosBtn" type="button" class="ghost clear-list-btn"><span class="button-icon icon-trash"></span>清空列表</button>
+              <label id="videoDropZone" class="file-upload file-upload-action" for="videoInput">
+                <input id="videoInput" class="visually-hidden-file" type="file" name="videos" accept="video/*" multiple required>
+                <span class="file-cta">选择视频</span>
+                <span id="videoPickerMeta" class="file-meta">支持多选、拖拽或选择文件夹</span>
+              </label>
+              <label class="file-upload file-upload-action folder-upload-action" for="folderInput">
+                <input id="folderInput" class="visually-hidden-file" type="file" accept="video/*" webkitdirectory directory multiple>
+                <span class="file-cta">选择文件夹</span>
+              </label>
+            </div>
+          </div>
+          <div class="video-table">
+            <div class="video-head">
+              <span>文件路径</span><span>分辨率</span><span>时长</span><span>大小</span><span>状态</span><span>操作</span>
+            </div>
+            <div id="selectedVideos" class="video-body empty">请选择视频文件</div>
+          </div>
+        </section>
+
+        <section class="sub-panel watermark-panel">
+          <div class="section-heading">
+            <h2>2. 水印基础参数</h2>
+            <p>固定水印适合常驻品牌标识，动态水印适合随机位置防录屏</p>
+          </div>
+          <div class="grid watermark-layout">
+            <div class="grid watermark-settings">
+              <div class="watermark-card">
+                <div class="row between">
+                  <strong>固定水印</strong>
+                  <label class="switch"><input type="checkbox" name="fixed_watermark_enabled" checked><span></span></label>
+                </div>
+                <label class="file-upload file-upload-small" for="fixedWatermarkInput">
+                  <input id="fixedWatermarkInput" class="visually-hidden-file" type="file" name="fixed_watermark" accept="image/*">
+                  <span class="file-cta">上传图片</span>
+                  <span id="fixedWatermarkName" class="file-meta">默认：rt.png</span>
+                </label>
+                <div class="grid compact">
+                  <label>位置
+                    <select id="fixedPreset" name="fixed_watermark_preset">
+                      <option value="top-left">左上</option>
+                      <option value="top-right" selected>右上</option>
+                      <option value="bottom-left">左下</option>
+                      <option value="bottom-right">右下</option>
+                      <option value="center">居中</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </label>
+                </div>
+                <input id="fixedWatermarkPos" type="hidden" name="fixed_watermark_pos" value="top-right">
+                <div class="grid two compact">
+                  <label>X(%)<input id="customX" type="number" min="0" max="100" value="50"></label>
+                  <label>Y(%)<input id="customY" type="number" min="0" max="100" value="50"></label>
+                </div>
+              </div>
+
+              <div class="watermark-card">
+                <div class="row between">
+                  <strong>动态水印</strong>
+                  <label class="switch"><input type="checkbox" name="dynamic_watermark_enabled" checked><span></span></label>
+                </div>
+                <label class="file-upload file-upload-small" for="dynamicWatermarkInput">
+                  <input id="dynamicWatermarkInput" class="visually-hidden-file" type="file" name="dynamic_watermark" accept="image/*">
+                  <span class="file-cta">上传图片</span>
+                  <span id="dynamicWatermarkName" class="file-meta">默认：dt.png</span>
+                </label>
+                <div class="grid two compact">
+                  <label>动态间隔(s)<input type="number" name="interval" min="10" max="600" value="60"></label>
+                  <label>动态时长(s)<input type="number" name="duration" min="1" max="30" value="5"></label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sub-panel preview-panel">
+          <div class="row between">
+            <div>
+              <h2>3. 水印预览</h2>
+              <p id="previewHint" class="meta">选择视频后显示固定与动态水印，固定水印可拖动定位</p>
+            </div>
+          </div>
+          <div class="preview-size-controls">
+            <label class="watermark-size-control">固定水印大小 <span id="fixedWatermarkSizeValue">6.25%</span>
+              <input id="fixedWatermarkSize" name="fixed_watermark_size" type="range" min="2" max="20" step="0.25" value="6.25">
+            </label>
+            <label class="watermark-size-control">动态水印大小 <span id="dynamicWatermarkSizeValue">6.25%</span>
+              <input id="dynamicWatermarkSize" name="dynamic_watermark_size" type="range" min="2" max="20" step="0.25" value="6.25">
+            </label>
+          </div>
+          <div id="previewStage" class="preview-stage">
+            <video id="previewVideo" muted playsinline></video>
+            <img id="previewWatermark" alt="固定水印预览">
+            <img id="previewDynamicWatermark" alt="动态水印预览">
+            <div id="previewEmpty">选择视频后可预览水印效果</div>
+          </div>
+        </section>
+
+        <section class="sub-panel process-params-panel">
+          <h2>4. 处理参数</h2>
+          <div class="grid three">
+            <label>质量值 CRF<input type="number" name="crf" min="20" max="51" value="32"></label>
+            <label>导出格式
+              <select name="format_type">
+                <option value="h264" selected>MP4 H.264</option>
+                <option value="h265">MP4 H.265</option>
+                <option value="mkv">MKV H.264</option>
+              </select>
+            </label>
+            <button type="submit">开始制作</button>
+          </div>
+          <div id="uploadProgress" class="upload-progress" hidden>
+            <span>上传进度</span>
+            <div class="bar"><i></i></div>
+            <strong>0%</strong>
+          </div>
+        </section>
+        </div>
+      </form>
+      </section>
+
+      <section id="recordsPage" class="panel page" hidden>
+      <div class="row between">
+        <div class="section-heading">
+          <h2>处理记录</h2>
+          <p id="configText">正在读取配置...</p>
+          <span id="recordsFeedback" class="records-feedback" role="status" aria-live="polite"></span>
+        </div>
+        <button id="refreshBtn" class="ghost">刷新</button>
+      </div>
+      <form id="recordFilters" class="record-filters">
+        <label>文件名或任务号<input id="recordSearch" type="search" placeholder="搜索视频文件名"></label>
+        <label>状态
+          <select id="recordStatus">
+            <option value="">全部状态</option>
+            <option value="done">已完成</option>
+            <option value="error">失败</option>
+            <option value="paused">已暂停</option>
+            <option value="running">处理中</option>
+            <option value="cleaned">文件已清理</option>
+          </select>
+        </label>
+        <label>开始日期<input id="recordDateFrom" type="date"></label>
+        <label>结束日期<input id="recordDateTo" type="date"></label>
+        <div class="record-filter-actions">
+          <button type="submit">筛选</button>
+          <button id="clearRecordFiltersBtn" type="button" class="ghost">清除</button>
+        </div>
+      </form>
+      <div id="jobs" class="jobs"></div>
+      <div id="recordsPagination" class="records-pagination" hidden></div>
+      </section>
+    </div>
+  </main>
+  <div id="confirmDialog" class="modal-backdrop" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <strong id="confirmTitle">确认操作</strong>
+      <p id="confirmMessage"></p>
+      <div class="modal-actions">
+        <button id="confirmCancelBtn" type="button" class="ghost">再想想</button>
+        <button id="confirmOkBtn" type="button" class="danger">确认</button>
+      </div>
+    </div>
+  </div>
+  <div id="videoPreviewDialog" class="modal-backdrop video-modal" hidden>
+    <div class="modal-card video-modal-card" role="dialog" aria-modal="true" aria-labelledby="videoPreviewTitle">
+      <div class="row between modal-head">
+        <strong id="videoPreviewTitle">视频预览</strong>
+        <button id="closeVideoPreviewBtn" type="button" class="icon-button" aria-label="关闭预览"></button>
+      </div>
+      <video id="videoPreviewPlayer" controls playsinline></video>
+    </div>
+  </div>
+  <div id="errorDialog" class="modal-backdrop" hidden>
+    <div class="modal-card error-modal" role="dialog" aria-modal="true" aria-labelledby="errorDialogTitle">
+      <div class="row between modal-head">
+        <strong id="errorDialogTitle">制作失败详情</strong>
+        <button id="closeErrorDialogBtn" type="button" class="icon-button" aria-label="关闭失败详情"></button>
+      </div>
+      <pre id="errorDialogMessage" class="error-dialog-message"></pre>
+    </div>
+  </div>
+  <div id="archiveDialog" class="modal-backdrop" hidden>
+    <div class="modal-card archive-modal" role="dialog" aria-modal="true" aria-labelledby="archiveTitle">
+      <strong id="archiveTitle">正在准备打包下载</strong>
+      <p id="archiveMessage">正在整理成品文件...</p>
+      <div class="archive-progress" aria-label="打包进度"><i id="archiveProgressBar"></i></div>
+      <strong id="archiveProgressText" class="archive-percent">0%</strong>
+      <a id="archiveDownloadFallback" class="archive-fallback" hidden>下载压缩包</a>
+      <div class="modal-actions">
+        <button id="closeArchiveDialogBtn" type="button" class="ghost" hidden>关闭</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/app.js?v=20260626-1730"></script>
+</body>
+</html>

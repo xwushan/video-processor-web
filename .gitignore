@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+
+# Runtime data is created under VIDEO_PROCESSOR_ROOT, but keep local runs clean.
+uploads/
+outputs/
+tmp/
+watermarks/
+video_processor.db
+*.zip
