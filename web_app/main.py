@@ -1112,12 +1112,11 @@ def process_job(job_id: str) -> None:
                     )
                     active_futures[future] = (file_row, ffmpeg_threads)
                     active_count = len(active_futures)
-                    cpu_note = f"，检测 CPU {cpu_percent:.0f}%" if cpu_percent is not None else ""
                     update_job(
                         job_id,
                         status="running",
                         worker_count=active_count,
-                        message=f"正在处理，任务数 {active_count}，本路 {ffmpeg_threads} 线程{cpu_note}",
+                        message=f"正在处理，任务数 {active_count}，本路 {ffmpeg_threads} 线程",
                     )
                     # Let the newly started encoder reach a stable load before sampling again.
                     next_launch_at = now + RESOURCE_WARMUP_SECONDS
