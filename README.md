@@ -77,6 +77,7 @@ export VIDEO_PROCESSOR_PUBLIC_URL='http://服务器IP:8899'
 
 `VIDEO_PROCESSOR_PUBLIC_URL` 为可选项；设置后，完成通知会附带打开处理记录页面的链接。
 部署后可以在“处理记录”页面点击“测试通知”验证机器人是否可用。如果提示 webhook 缺少完整 key，请检查面板里的环境变量是否保存成了完整的 `...send?key=xxxx`。
+如果提示 `CERTIFICATE_VERIFY_FAILED`，请在项目环境中重新执行 `pip install -r requirements-web.txt`，新版依赖会安装 `certifi` 证书包；Ubuntu 服务器也建议确认已安装 `ca-certificates`。
 
 ### 可选访问保护
 

@@ -9,6 +9,7 @@ import re
 import shlex
 import signal
 import shutil
+import ssl
 import sqlite3
 import subprocess
 import sys
@@ -28,6 +29,11 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import psutil
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - runtime fallback for older deployments
+    certifi = None
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -172,6 +178,13 @@ def wecom_config_error() -> str:
     return ""
 
 
+def https_ssl_context() -> ssl.SSLContext:
+    """Use certifi when installed so minimal Linux images have a reliable CA store."""
+    if certifi:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
 def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
     """Send a concise notification without exposing the configured webhook."""
     config_error = wecom_config_error()
@@ -190,12 +203,16 @@ def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=8) as response:
+        with urlopen(request, timeout=8, context=https_ssl_context()) as response:
             response_data = json.loads(response.read().decode("utf-8") or "{}")
         if response_data.get("errcode", 0) != 0:
             detail = f"企业微信拒绝通知：{response_data.get('errmsg', response_data)}"
             print(detail, file=sys.stderr)
             return False, detail
+    except ssl.SSLCertVerificationError as exc:
+        detail = f"企业微信接口证书校验失败：{exc}。请安装/更新 certifi 或系统 ca-certificates"
+        print(detail, file=sys.stderr)
+        return False, detail
     except HTTPError as exc:
         detail = f"企业微信接口 HTTP {exc.code}"
         print(detail, file=sys.stderr)
