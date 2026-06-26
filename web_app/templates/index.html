@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260626-1730">
+  <link rel="stylesheet" href="/static/app.css?v=20260626-1845">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -214,7 +214,10 @@
           <p id="configText">正在读取配置...</p>
           <span id="recordsFeedback" class="records-feedback" role="status" aria-live="polite"></span>
         </div>
-        <button id="refreshBtn" class="ghost">刷新</button>
+        <div class="records-top-actions">
+          <button id="testWecomBtn" class="ghost" type="button">测试通知</button>
+          <button id="refreshBtn" class="ghost" type="button">刷新</button>
+        </div>
       </div>
       <form id="recordFilters" class="record-filters">
         <label>文件名或任务号<input id="recordSearch" type="search" placeholder="搜索视频文件名"></label>
@@ -280,6 +283,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=20260626-1730"></script>
+  <script src="/static/app.js?v=20260626-1845"></script>
 </body>
 </html>

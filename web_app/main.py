@@ -162,10 +162,22 @@ def now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def send_wecom_notification(title: str, lines: list[str]) -> bool:
-    """Send a concise notification without exposing the configured webhook."""
+def wecom_config_error() -> str:
     if not WECHAT_WEBHOOK:
-        return False
+        return "未配置 VIDEO_PROCESSOR_WECHAT_WEBHOOK"
+    if "qyapi.weixin.qq.com/cgi-bin/webhook/send" not in WECHAT_WEBHOOK:
+        return "企业微信 webhook 地址格式不正确"
+    if "key=" not in WECHAT_WEBHOOK or not WECHAT_WEBHOOK.split("key=", 1)[1].strip():
+        return "企业微信 webhook 缺少完整 key，请检查宝塔环境变量是否被截断"
+    return ""
+
+
+def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
+    """Send a concise notification without exposing the configured webhook."""
+    config_error = wecom_config_error()
+    if config_error:
+        print(f"Enterprise WeChat notification skipped: {config_error}", file=sys.stderr)
+        return False, config_error
     content = "\n".join([f"### {title}", *[f"> {line}" for line in lines]])
     payload = json.dumps(
         {"msgtype": "markdown", "markdown": {"content": content}},
@@ -181,21 +193,35 @@ def send_wecom_notification(title: str, lines: list[str]) -> bool:
         with urlopen(request, timeout=8) as response:
             response_data = json.loads(response.read().decode("utf-8") or "{}")
         if response_data.get("errcode", 0) != 0:
-            print("Enterprise WeChat notification was rejected.", file=sys.stderr)
-            return False
-    except (HTTPError, URLError, TimeoutError, ValueError, OSError):
-        print("Enterprise WeChat notification could not be sent.", file=sys.stderr)
-        return False
-    return True
+            detail = f"企业微信拒绝通知：{response_data.get('errmsg', response_data)}"
+            print(detail, file=sys.stderr)
+            return False, detail
+    except HTTPError as exc:
+        detail = f"企业微信接口 HTTP {exc.code}"
+        print(detail, file=sys.stderr)
+        return False, detail
+    except URLError as exc:
+        detail = f"企业微信接口连接失败：{exc.reason}"
+        print(detail, file=sys.stderr)
+        return False, detail
+    except TimeoutError:
+        detail = "企业微信接口连接超时"
+        print(detail, file=sys.stderr)
+        return False, detail
+    except (ValueError, OSError) as exc:
+        detail = f"企业微信通知发送异常：{exc}"
+        print(detail, file=sys.stderr)
+        return False, detail
+    return True, "企业微信通知已发送"
 
 
-def notify_job_result(job_id: str, result: str, job: Optional[sqlite3.Row] = None) -> None:
+def notify_job_result(job_id: str, result: str, job: Optional[sqlite3.Row] = None) -> bool:
     """Notify only terminal task results: completed, completed with errors, or canceled."""
     if not WECHAT_WEBHOOK:
-        return
+        return False
     job = job or get_job(job_id)
     if not job:
-        return
+        return False
     if result == "canceled":
         title = "视频处理任务已取消"
         summary = "本次上传文件、成品文件和处理记录已删除"
@@ -212,7 +238,10 @@ def notify_job_result(job_id: str, result: str, job: Optional[sqlite3.Row] = Non
     ]
     if PUBLIC_WEB_URL and result != "canceled":
         lines.append(f"[打开处理记录]({PUBLIC_WEB_URL})")
-    send_wecom_notification(title, lines)
+    ok, detail = send_wecom_notification(title, lines)
+    if not ok:
+        print(f"Job {job_id} notification failed: {detail}", file=sys.stderr)
+    return ok
 
 
 def ensure_dirs() -> None:
@@ -1019,6 +1048,8 @@ def process_job(job_id: str) -> None:
     files = [row for row in get_job_files(job_id) if row["status"] != "done"]
     if not files:
         update_job(job_id, status="done", progress=100, message="全部处理完成")
+        if job["status"] not in TERMINAL_JOB_STATUS:
+            notify_job_result(job_id, "done")
         return
     settings = json.loads(job["settings_json"])
     worker_limit = recommend_worker_limit(files)
@@ -1320,7 +1351,26 @@ def config() -> dict:
         "min_free_disk_gb": MIN_FREE_DISK_GB,
         "archive_retention_hours": ARCHIVE_RETENTION_HOURS,
         "auth_enabled": bool(AUTH_PASSWORD),
+        "wecom_enabled": bool(WECHAT_WEBHOOK),
     }
+
+
+@app.post("/api/notifications/wecom/test")
+def test_wecom_notification() -> dict:
+    config_error = wecom_config_error()
+    if config_error:
+        raise HTTPException(status_code=400, detail=config_error)
+    ok, detail = send_wecom_notification(
+        "视频处理器测试通知",
+        [
+            f"发送时间：{now_iso()}",
+            "如果你看到这条消息，说明企业微信机器人配置已生效。",
+            f"访问地址：{PUBLIC_WEB_URL or '未配置 VIDEO_PROCESSOR_PUBLIC_URL'}",
+        ],
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "message": detail}
 
 
 def system_status_payload() -> dict:
@@ -1941,6 +1991,7 @@ def resume_job(job_id: str) -> dict:
         conn.commit()
     if remaining <= 0:
         update_job(job_id, status="done", progress=100, message="全部处理完成")
+        notify_job_result(job_id, "done")
         return {"ok": True, "status": "done"}
     clear_cancel_event(job_id)
     update_job(job_id, status="queued", message="已继续，等待处理")

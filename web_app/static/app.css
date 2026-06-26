@@ -1361,6 +1361,18 @@ button.danger:hover {
   border-radius: 8px;
 }
 
+.records-top-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.records-top-actions button {
+  min-width: 104px;
+}
+
 .current-files {
   display: grid;
   gap: 8px;
@@ -1684,6 +1696,14 @@ button.danger:hover {
   #recordsPage > .row.between {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .records-top-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .records-top-actions button {
+    width: 100%;
   }
   .section-actions {
     width: 100%;
