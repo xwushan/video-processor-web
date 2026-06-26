@@ -38,7 +38,6 @@ const previewHint = document.querySelector("#previewHint");
 const uploadProgress = document.querySelector("#uploadProgress");
 const uploadProgressBar = uploadProgress.querySelector(".bar i");
 const uploadProgressText = uploadProgress.querySelector("strong");
-const currentStatusText = document.querySelector("#currentStatusText");
 const currentProgressText = document.querySelector("#currentProgressText");
 const currentProgressBar = document.querySelector("#currentProgressBar");
 const currentJobMeta = document.querySelector("#currentJobMeta");
@@ -959,7 +958,6 @@ function renderCurrent(detail) {
   if (!job) {
     currentJobId = null;
     localStorage.removeItem("currentJobId");
-    currentStatusText.textContent = "暂无正在处理的任务";
     currentProgressText.textContent = "0%";
     currentProgressBar.style.width = "0%";
     document.querySelector(".progress-ring").style.setProperty("--progress", "0%");
@@ -976,7 +974,6 @@ function renderCurrent(detail) {
   localStorage.setItem("currentJobId", job.id);
   const terminalStatus = ["done", "error", "canceled", "cleaned"].includes(job.status);
   const progress = displayProgress(job.progress, terminalStatus);
-  currentStatusText.textContent = `任务 ${job.id} · ${statusText(job.status)} · ${job.message || ""}`;
   currentProgressText.textContent = `${progress}%`;
   currentProgressBar.style.width = `${progress}%`;
   document.querySelector(".progress-ring").style.setProperty("--progress", `${progress}%`);
