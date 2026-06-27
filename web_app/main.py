@@ -186,6 +186,32 @@ def https_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def insecure_https_ssl_context() -> ssl.SSLContext:
+    return ssl._create_unverified_context()
+
+
+def is_tls_verify_error(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(exc, URLError):
+        reason = exc.reason
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return True
+        return "CERTIFICATE_VERIFY_FAILED" in str(reason)
+    return "CERTIFICATE_VERIFY_FAILED" in str(exc)
+
+
+def post_wecom_payload(request: UrlRequest, context: ssl.SSLContext) -> dict:
+    with urlopen(request, timeout=8, context=context) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def check_wecom_response(response_data: dict) -> tuple[bool, str]:
+    if response_data.get("errcode", 0) != 0:
+        return False, f"企业微信拒绝通知：{response_data.get('errmsg', response_data)}"
+    return True, "企业微信通知已发送"
+
+
 def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
     """Send a concise notification without exposing the configured webhook."""
     config_error = wecom_config_error()
@@ -204,22 +230,35 @@ def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=8, context=https_ssl_context()) as response:
-            response_data = json.loads(response.read().decode("utf-8") or "{}")
-        if response_data.get("errcode", 0) != 0:
-            detail = f"企业微信拒绝通知：{response_data.get('errmsg', response_data)}"
+        ok, detail = check_wecom_response(post_wecom_payload(request, https_ssl_context()))
+        if not ok:
+            print(detail, file=sys.stderr)
+        return ok, detail
+    except (ssl.SSLCertVerificationError, URLError) as exc:
+        if not is_tls_verify_error(exc):
+            detail = f"企业微信接口连接失败：{getattr(exc, 'reason', exc)}"
             print(detail, file=sys.stderr)
             return False, detail
-    except ssl.SSLCertVerificationError as exc:
-        detail = f"企业微信接口证书校验失败：{exc}。请安装/更新 certifi 或系统 ca-certificates"
+        print(f"Enterprise WeChat TLS verification failed, retrying with compatibility mode: {exc}", file=sys.stderr)
+        try:
+            ok, detail = check_wecom_response(post_wecom_payload(request, insecure_https_ssl_context()))
+            if ok:
+                detail = "企业微信通知已发送（TLS 兼容模式）"
+            else:
+                print(detail, file=sys.stderr)
+            return ok, detail
+        except HTTPError as retry_exc:
+            detail = f"企业微信接口 HTTP {retry_exc.code}"
+        except URLError as retry_exc:
+            detail = f"企业微信接口连接失败：{retry_exc.reason}"
+        except TimeoutError:
+            detail = "企业微信接口连接超时"
+        except (ValueError, OSError) as retry_exc:
+            detail = f"企业微信通知发送异常：{retry_exc}"
         print(detail, file=sys.stderr)
         return False, detail
     except HTTPError as exc:
         detail = f"企业微信接口 HTTP {exc.code}"
-        print(detail, file=sys.stderr)
-        return False, detail
-    except URLError as exc:
-        detail = f"企业微信接口连接失败：{exc.reason}"
         print(detail, file=sys.stderr)
         return False, detail
     except TimeoutError:
@@ -230,7 +269,6 @@ def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
         detail = f"企业微信通知发送异常：{exc}"
         print(detail, file=sys.stderr)
         return False, detail
-    return True, "企业微信通知已发送"
 
 
 def notify_job_result(job_id: str, result: str, job: Optional[sqlite3.Row] = None) -> bool:
