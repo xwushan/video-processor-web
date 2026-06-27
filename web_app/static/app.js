@@ -5,7 +5,6 @@ const processPage = document.querySelector("#processPage");
 const recordsPage = document.querySelector("#recordsPage");
 const jobsEl = document.querySelector("#jobs");
 const refreshBtn = document.querySelector("#refreshBtn");
-const testWecomBtn = document.querySelector("#testWecomBtn");
 const configText = document.querySelector("#configText");
 const recordsFeedback = document.querySelector("#recordsFeedback");
 const videoInput = document.querySelector("#videoInput");
@@ -704,7 +703,6 @@ async function loadConfig() {
     const res = await fetch("/api/config");
     const cfg = await res.json();
     configText.textContent = `目录 ${cfg.root}，文件保留 ${cfg.file_retention_days} 天，记录保留 ${cfg.record_retention_days} 天`;
-    testWecomBtn.hidden = !cfg.wecom_enabled;
   } catch {
     configText.textContent = "配置读取失败，请确认服务正在运行";
   }
@@ -927,29 +925,6 @@ async function refreshRecords() {
   refreshBtn.disabled = false;
   refreshBtn.textContent = "刷新";
   showToast(success ? "处理记录已刷新" : "刷新失败，请稍后重试", success ? "success" : "error");
-}
-
-async function testWecomNotification() {
-  if (testWecomBtn.disabled) return;
-  testWecomBtn.disabled = true;
-  const defaultText = testWecomBtn.textContent;
-  testWecomBtn.textContent = "发送中...";
-  try {
-    const response = await fetch("/api/notifications/wecom/test", { method: "POST" });
-    let payload = {};
-    try {
-      payload = await response.json();
-    } catch {
-      // Keep the fallback below.
-    }
-    if (!response.ok) throw new Error(payload.detail || "测试通知发送失败");
-    showToast(payload.message || "测试通知已发送");
-  } catch (error) {
-    showToast(error.message || "测试通知发送失败", "error");
-  } finally {
-    testWecomBtn.disabled = false;
-    testWecomBtn.textContent = defaultText;
-  }
 }
 
 function renderCurrent(detail) {
@@ -1320,7 +1295,6 @@ form.addEventListener("submit", async (event) => {
 });
 
 refreshBtn.addEventListener("click", refreshRecords);
-testWecomBtn.addEventListener("click", testWecomNotification);
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submit = loginForm.querySelector("button[type=submit]");
