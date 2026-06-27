@@ -777,6 +777,7 @@ button.text {
   background: #fff1f3;
   color: #c92445;
   padding: 0 12px;
+  white-space: nowrap;
 }
 
 button.danger {
@@ -907,14 +908,23 @@ button.danger:hover {
   overflow: hidden;
   background: #fff;
   box-shadow: 0 8px 20px rgba(42, 76, 112, 0.05);
+  container-type: inline-size;
 }
 
 .video-head,
 .video-row {
   display: grid;
-  grid-template-columns: minmax(100px, 1fr) 64px 56px 60px 52px 40px;
-  gap: 5px;
+  grid-template-columns: minmax(84px, 1fr) minmax(76px, auto) minmax(62px, auto) minmax(68px, auto) minmax(54px, auto) minmax(52px, auto);
+  gap: 6px;
   align-items: center;
+}
+
+@container (min-width: 760px) {
+  .video-head,
+  .video-row {
+    grid-template-columns: minmax(260px, 1fr) 104px 92px 96px 74px 64px;
+    gap: 12px;
+  }
 }
 
 .video-head {
@@ -945,6 +955,34 @@ button.danger:hover {
   padding: 10px 12px;
   border-top: 1px solid #edf2f8;
   min-height: 52px;
+}
+
+.video-head > span,
+.video-row > span,
+.video-row > button {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.video-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-head > span:nth-child(n + 2),
+.video-row > span:nth-child(n + 2) {
+  text-align: center;
+}
+
+.video-head > span:nth-child(4),
+.video-row > span:nth-child(4) {
+  text-align: right;
+}
+
+.video-row > button {
+  justify-self: end;
+  width: 52px;
+  padding-inline: 0;
 }
 
 .tree-folder {
