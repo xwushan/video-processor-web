@@ -221,8 +221,8 @@ def send_wecom_notification(title: str, lines: list[str]) -> tuple[bool, str]:
     content = "\n".join([f"### {title}", *[f"> {line}" for line in lines]])
     payload = json.dumps(
         {"msgtype": "markdown", "markdown": {"content": content}},
-        ensure_ascii=False,
-    ).encode("utf-8")
+        ensure_ascii=True,
+    ).encode("ascii")
     request = UrlRequest(
         WECHAT_WEBHOOK,
         data=payload,
