@@ -147,7 +147,8 @@ async def optional_basic_auth(request: Request, call_next):
         status_code=401,
     )
 
-db_lock = threading.Lock()
+db_lock = threading.RLock()
+db_schema_ready = False
 job_queue: "queue.Queue[str]" = queue.Queue()
 worker_lock = threading.Lock()
 worker_thread: Optional[threading.Thread] = None
@@ -266,12 +267,75 @@ def ensure_dirs() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
+def initialize_db_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress REAL NOT NULL DEFAULT 0,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            done_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            worker_count INTEGER NOT NULL DEFAULT 1,
+            settings_json TEXT NOT NULL,
+            upload_dir TEXT NOT NULL,
+            output_dir TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_files (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            input_path TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress REAL NOT NULL DEFAULT 0,
+            resolution TEXT NOT NULL DEFAULT 'N/A',
+            duration_sec REAL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            encoder_threads INTEGER NOT NULL DEFAULT 0,
+            speed REAL NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(job_id) REFERENCES jobs(id)
+        )
+        """
+    )
+    existing_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(job_files)").fetchall()
+    }
+    if "encoder_threads" not in existing_columns:
+        conn.execute("ALTER TABLE job_files ADD COLUMN encoder_threads INTEGER NOT NULL DEFAULT 0")
+    if "speed" not in existing_columns:
+        conn.execute("ALTER TABLE job_files ADD COLUMN speed REAL NOT NULL DEFAULT 0")
+    if "attempts" not in existing_columns:
+        conn.execute("ALTER TABLE job_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+
 @contextmanager
 def db_connect():
     """Open a short-lived SQLite connection and always release its file handle."""
+    global db_schema_ready
+    ensure_dirs()
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
+    if not db_schema_ready:
+        with db_lock:
+            if not db_schema_ready:
+                initialize_db_schema(conn)
+                db_schema_ready = True
     try:
         yield conn
     finally:
@@ -279,61 +343,11 @@ def db_connect():
 
 
 def init_db() -> None:
+    global db_schema_ready
     ensure_dirs()
     with db_lock, db_connect() as conn:
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                progress REAL NOT NULL DEFAULT 0,
-                total_count INTEGER NOT NULL DEFAULT 0,
-                done_count INTEGER NOT NULL DEFAULT 0,
-                failed_count INTEGER NOT NULL DEFAULT 0,
-                worker_count INTEGER NOT NULL DEFAULT 1,
-                settings_json TEXT NOT NULL,
-                upload_dir TEXT NOT NULL,
-                output_dir TEXT NOT NULL,
-                message TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_files (
-                id TEXT PRIMARY KEY,
-                job_id TEXT NOT NULL,
-                original_name TEXT NOT NULL,
-                input_path TEXT NOT NULL,
-                output_path TEXT NOT NULL,
-                status TEXT NOT NULL,
-                progress REAL NOT NULL DEFAULT 0,
-                resolution TEXT NOT NULL DEFAULT 'N/A',
-                duration_sec REAL,
-                size_bytes INTEGER NOT NULL DEFAULT 0,
-                encoder_threads INTEGER NOT NULL DEFAULT 0,
-                speed REAL NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                error TEXT NOT NULL DEFAULT '',
-                FOREIGN KEY(job_id) REFERENCES jobs(id)
-            )
-            """
-        )
-        existing_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(job_files)").fetchall()
-        }
-        if "encoder_threads" not in existing_columns:
-            conn.execute("ALTER TABLE job_files ADD COLUMN encoder_threads INTEGER NOT NULL DEFAULT 0")
-        if "speed" not in existing_columns:
-            conn.execute("ALTER TABLE job_files ADD COLUMN speed REAL NOT NULL DEFAULT 0")
-        if "attempts" not in existing_columns:
-            conn.execute("ALTER TABLE job_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
+        initialize_db_schema(conn)
+        db_schema_ready = True
 
 
 def sanitize_filename(name: str) -> str:

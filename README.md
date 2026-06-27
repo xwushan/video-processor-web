@@ -45,6 +45,21 @@ VIDEO_PROCESSOR_ROOT=/data/video-processor-data uvicorn web_app.main:app --host 
 http://服务器IP:8899
 ```
 
+如果宝塔启动命令里使用了：
+
+```bash
+--env-file /data/video-processor-data/video-processor.env
+```
+
+需要先创建这个文件，否则 uvicorn 会直接启动失败：
+
+```bash
+sudo mkdir -p /data/video-processor-data
+sudo touch /data/video-processor-data/video-processor.env
+```
+
+也可以改用 `deploy/start-web.sh` 启动脚本；它会在 env 文件存在时自动加载，不存在时正常启动。
+
 ## 保存时间
 
 默认文件保留 14 天，处理记录保留 90 天。
@@ -112,13 +127,14 @@ After=network.target
 
 [Service]
 WorkingDirectory=/data/video-processor-web
+EnvironmentFile=-/data/video-processor-data/video-processor.env
 Environment=VIDEO_PROCESSOR_ROOT=/data/video-processor-data
 Environment=VIDEO_PROCESSOR_FILE_RETENTION_DAYS=14
 Environment=VIDEO_PROCESSOR_RECORD_RETENTION_DAYS=90
 Environment=VIDEO_PROCESSOR_MIN_FREE_GB=20
 Environment=VIDEO_PROCESSOR_ARCHIVE_RETENTION_HOURS=24
 Environment=VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
-ExecStart=/data/video-processor-web/.venv/bin/uvicorn web_app.main:app --host 0.0.0.0 --port 8899 --workers 1
+ExecStart=/data/video-processor-web/deploy/start-web.sh
 Restart=always
 RestartSec=3
 
