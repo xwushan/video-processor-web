@@ -1,6 +1,6 @@
 # 视频处理器 Web 版
 
-内网 Web 版默认部署目录：
+内网 Web 版默认部署目录：111
 
 ```bash
 /data/video-processor-web
