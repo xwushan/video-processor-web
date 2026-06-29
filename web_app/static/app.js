@@ -28,6 +28,8 @@ const fixedWatermarkSize = document.querySelector("#fixedWatermarkSize");
 const dynamicWatermarkSize = document.querySelector("#dynamicWatermarkSize");
 const fixedWatermarkSizeValue = document.querySelector("#fixedWatermarkSizeValue");
 const dynamicWatermarkSizeValue = document.querySelector("#dynamicWatermarkSizeValue");
+const encoderPreset = document.querySelector("#encoderPreset");
+const encoderPresetHint = document.querySelector("#encoderPresetHint");
 const previewVideo = document.querySelector("#previewVideo");
 const previewWatermark = document.querySelector("#previewWatermark");
 const previewDynamicWatermark = document.querySelector("#previewDynamicWatermark");
@@ -106,6 +108,14 @@ let recordErrorDetails = new Map();
 let recordsPageNumber = 1;
 let systemStatusRequestInFlight = false;
 
+const ENCODER_PRESET_HINTS = {
+  ultrafast: "极速优先会尽可能加快编码，适合临时预览或特别赶时间的任务，文件体积通常会更大。",
+  veryfast: "速度优先适合批量处理，编码速度更快，文件体积可能略大。",
+  fast: "均衡模式兼顾速度和文件体积，适合对处理时间和输出大小都有要求的任务。",
+  medium: "体积优先会花更多时间压缩，输出文件通常更小，适合不太赶时间的任务。",
+  slow: "高压缩会明显降低处理速度，换取更充分的压缩，适合少量视频或对体积更敏感的场景。",
+};
+
 function showToast(message, tone = "success") {
   const toast = document.createElement("div");
   toast.className = `toast ${tone}`.trim();
@@ -146,6 +156,11 @@ function statusText(status) {
     cleaned: "文件已清理",
     error: "失败"
   }[status] || status;
+}
+
+function updateEncoderPresetHint() {
+  if (!encoderPreset || !encoderPresetHint) return;
+  encoderPresetHint.textContent = ENCODER_PRESET_HINTS[encoderPreset.value] || ENCODER_PRESET_HINTS.veryfast;
 }
 
 function fmtSize(bytes) {
@@ -1295,6 +1310,7 @@ form.addEventListener("submit", async (event) => {
 });
 
 refreshBtn.addEventListener("click", refreshRecords);
+encoderPreset.addEventListener("change", updateEncoderPresetHint);
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submit = loginForm.querySelector("button[type=submit]");
@@ -1530,6 +1546,7 @@ for (const eventName of ["click", "input", "change", "keydown", "submit"]) {
 }
 
 async function boot() {
+  updateEncoderPresetHint();
   await loadConfig();
   await renderSelectedVideos();
   await loadCurrentJob();

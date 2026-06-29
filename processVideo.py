@@ -235,16 +235,20 @@ def parse_watermark_position(pos_str, width, height, watermark_w=120, watermark_
         return random_x_y(width, height)
 
 
-def _encoder_preset(env_name, default):
+def _encoder_preset(env_name, default, override=None):
     allowed = {
         "ultrafast", "superfast", "veryfast", "faster", "fast",
         "medium", "slow", "slower", "veryslow", "placebo",
     }
+    if override:
+        selected = str(override).strip().lower()
+        if selected in allowed:
+            return selected
     value = os.getenv(env_name, default).strip().lower()
     return value if value in allowed else default
 
 
-def _get_format_config(format_type):
+def _get_format_config(format_type, encoder_preset=None):
     """
     根据导出格式类型返回对应的编码器配置
     format_type: "h264" | "h265" | "mkv"
@@ -253,27 +257,27 @@ def _get_format_config(format_type):
         "h264": {
             "codec": "libx264",
             "ext": ".mp4",
-            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_H264_PRESET", "veryfast")} -profile:v high',
+            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_H264_PRESET", "veryfast", encoder_preset)} -profile:v high',
         },
         "h265": {
             "codec": "libx265",
             "ext": ".mp4",
-            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_H265_PRESET", "fast")} -tag:v hvc1',
+            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_H265_PRESET", "fast", encoder_preset)} -tag:v hvc1',
         },
         "mkv": {
             "codec": "libx264",
             "ext": ".mkv",
-            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_MKV_PRESET", "veryfast")}',
+            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_MKV_PRESET", "veryfast", encoder_preset)}',
         },
     }
     return configs.get(format_type, configs["h264"])
 
 
 
-def _get_video_codec_args(format_type, quality):
+def _get_video_codec_args(format_type, quality, encoder_preset=None):
     """Return CPU video encoder args."""
     common = "-pix_fmt yuv420p"
-    fmt = _get_format_config(format_type)
+    fmt = _get_format_config(format_type, encoder_preset)
     return f'-c:v {fmt["codec"]} -crf {quality} {fmt["extra"]} {common}'
 
 
@@ -308,7 +312,8 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
                             format_type="h264", watermark_opacity=1.0,
                             fixed_watermark_path=None, dynamic_watermark_path=None,
                             fixed_watermark_width_ratio=None, dynamic_watermark_width_ratio=None,
-                            encoder_threads=None, filter_threads=1):
+                            encoder_threads=None, filter_threads=1,
+                            encoder_preset=None):
     """
     生成带有水印的FFmpeg命令。
 
@@ -352,7 +357,7 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
     height = int(video_stream.get('height') or video_stream.get('coded_height') or 1080)
 
     # 获取格式配置
-    fmt = _get_format_config(format_type)
+    fmt = _get_format_config(format_type, encoder_preset)
 
     # 修正输出路径扩展名
     if not output_path.lower().endswith(fmt["ext"]):
@@ -423,7 +428,7 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
         filter_args = '-map 0:v:0 '
 
     # 构建最终命令
-    video_codec_args = _get_video_codec_args(format_type, crf)
+    video_codec_args = _get_video_codec_args(format_type, crf, encoder_preset)
     ffmpeg_command = (
         f'"{ffmpeg_exe}" -hide_banner -nostdin -nostats -progress pipe:2 -y {input_files} '
         f'{filter_args}-map 0:a? '

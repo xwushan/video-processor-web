@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260627-1450">
+  <link rel="stylesheet" href="/static/app.css?v=20260629-encoder-preset">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -187,6 +187,15 @@
           <h2>4. 处理参数</h2>
           <div class="grid three">
             <label>质量值 CRF<input type="number" name="crf" min="20" max="51" value="32"></label>
+            <label>编码策略
+              <select id="encoderPreset" name="encoder_preset">
+                <option value="ultrafast">极速优先：最快，文件较大</option>
+                <option value="veryfast" selected>速度优先：批量处理推荐</option>
+                <option value="fast">均衡：速度和体积折中</option>
+                <option value="medium">体积优先：更小但更慢</option>
+                <option value="slow">高压缩：最慢，体积更小</option>
+              </select>
+            </label>
             <label>导出格式
               <select name="format_type">
                 <option value="h264" selected>MP4 H.264</option>
@@ -194,6 +203,7 @@
                 <option value="mkv">MKV H.264</option>
               </select>
             </label>
+            <p id="encoderPresetHint" class="param-hint">速度优先适合批量处理，编码速度更快，文件体积可能略大。</p>
             <button type="submit">开始制作</button>
           </div>
           <div id="uploadProgress" class="upload-progress" hidden>
@@ -281,6 +291,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=20260627-1450"></script>
+  <script src="/static/app.js?v=20260629-encoder-preset"></script>
 </body>
 </html>

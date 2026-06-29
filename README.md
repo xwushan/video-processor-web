@@ -83,7 +83,15 @@ export VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
 
 ## 编码性能
 
-服务端固定使用 CPU 编码。默认优先处理速度，H.264 使用 `veryfast`，H.265 使用 `fast`。如果更在意文件体积，可以在服务器环境变量中调慢 preset：
+服务端固定使用 CPU 编码。处理页面可以选择编码策略：
+
+- 极速优先：最快，文件通常更大。
+- 速度优先：批量处理推荐，速度更快，文件可能略大。
+- 均衡：速度和体积折中。
+- 体积优先：输出通常更小，但更慢。
+- 高压缩：处理最慢，适合少量视频或特别在意体积的任务。
+
+也可以通过服务器环境变量设置默认/兜底 preset：
 
 ```bash
 export VIDEO_PROCESSOR_H264_PRESET=veryfast

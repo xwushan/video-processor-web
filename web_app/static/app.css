@@ -409,6 +409,17 @@ form {
   width: 100%;
 }
 
+.param-hint {
+  margin: -2px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f5f9ff;
+  color: #4f6b86;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .grid {
   display: grid;
   gap: 16px;

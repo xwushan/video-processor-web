@@ -56,6 +56,7 @@ MAX_UPLOAD_MB = int(os.getenv("VIDEO_PROCESSOR_MAX_UPLOAD_MB", "8192"))
 CPU_RESERVE_RATIO = 0.20
 MAX_CONCURRENT_VIDEO_TASKS = 8
 MAX_ENCODER_THREADS_PER_TASK = 64
+ENCODER_PRESETS = {"ultrafast", "veryfast", "fast", "medium", "slow"}
 RESOURCE_SAMPLE_INTERVAL_SECONDS = 3.0
 RESOURCE_WARMUP_SECONDS = 5.0
 ARCHIVE_CHUNK_SIZE = 4 * 1024 * 1024
@@ -411,6 +412,11 @@ def bool_from_form(value: str) -> bool:
     return str(value).lower() in {"1", "true", "yes", "on", "开启"}
 
 
+def safe_encoder_preset(value: str) -> str:
+    selected = str(value or "").strip().lower()
+    return selected if selected in ENCODER_PRESETS else "veryfast"
+
+
 def build_job_settings(
     fixed_watermark_enabled: str,
     dynamic_watermark_enabled: str,
@@ -419,6 +425,7 @@ def build_job_settings(
     duration: str,
     crf: str,
     format_type: str,
+    encoder_preset: str,
     fixed_watermark_size: str,
     dynamic_watermark_size: str,
 ) -> dict:
@@ -430,6 +437,7 @@ def build_job_settings(
         "duration": parse_int(duration, 5, 1, 30),
         "crf": parse_int(crf, 32, 20, 51),
         "format_type": format_type if format_type in {"h264", "h265", "mkv"} else "h264",
+        "encoder_preset": safe_encoder_preset(encoder_preset),
         "fixed_watermark_size": parse_float(fixed_watermark_size, 6.25, 2, 20),
         "dynamic_watermark_size": parse_float(dynamic_watermark_size, 6.25, 2, 20),
         "fixed_watermark_path": None,
@@ -1067,6 +1075,7 @@ def process_file(
         dynamic_watermark_width_ratio=settings.get("dynamic_watermark_size", 6.25) / 100,
         encoder_threads=ffmpeg_threads,
         filter_threads=filter_threads,
+        encoder_preset=settings.get("encoder_preset", "veryfast"),
     )
     if not command:
         update_file(file_row["id"], status="error", error="无法生成 FFmpeg 命令")
@@ -1733,6 +1742,7 @@ async def complete_resumable_upload(
     duration: str = Form("5"),
     crf: str = Form("32"),
     format_type: str = Form("h264"),
+    encoder_preset: str = Form("veryfast"),
     fixed_watermark_size: str = Form("6.25"),
     dynamic_watermark_size: str = Form("6.25"),
 ) -> dict:
@@ -1758,6 +1768,7 @@ async def complete_resumable_upload(
         duration,
         crf,
         format_type,
+        encoder_preset,
         fixed_watermark_size,
         dynamic_watermark_size,
     )
@@ -1818,6 +1829,7 @@ async def create_job(
     duration: str = Form("5"),
     crf: str = Form("32"),
     format_type: str = Form("h264"),
+    encoder_preset: str = Form("veryfast"),
     fixed_watermark_size: str = Form("6.25"),
     dynamic_watermark_size: str = Form("6.25"),
 ) -> dict:
@@ -1840,6 +1852,7 @@ async def create_job(
         duration,
         crf,
         format_type,
+        encoder_preset,
         fixed_watermark_size,
         dynamic_watermark_size,
     )
