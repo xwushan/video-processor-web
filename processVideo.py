@@ -235,6 +235,15 @@ def parse_watermark_position(pos_str, width, height, watermark_w=120, watermark_
         return random_x_y(width, height)
 
 
+def _encoder_preset(env_name, default):
+    allowed = {
+        "ultrafast", "superfast", "veryfast", "faster", "fast",
+        "medium", "slow", "slower", "veryslow", "placebo",
+    }
+    value = os.getenv(env_name, default).strip().lower()
+    return value if value in allowed else default
+
+
 def _get_format_config(format_type):
     """
     根据导出格式类型返回对应的编码器配置
@@ -244,17 +253,17 @@ def _get_format_config(format_type):
         "h264": {
             "codec": "libx264",
             "ext": ".mp4",
-            "extra": "-preset medium -profile:v high",
+            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_H264_PRESET", "veryfast")} -profile:v high',
         },
         "h265": {
             "codec": "libx265",
             "ext": ".mp4",
-            "extra": "-preset medium -tag:v hvc1",
+            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_H265_PRESET", "fast")} -tag:v hvc1',
         },
         "mkv": {
             "codec": "libx264",
             "ext": ".mkv",
-            "extra": "-preset fast",
+            "extra": f'-preset {_encoder_preset("VIDEO_PROCESSOR_MKV_PRESET", "veryfast")}',
         },
     }
     return configs.get(format_type, configs["h264"])

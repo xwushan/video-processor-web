@@ -81,6 +81,18 @@ export VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
 
 文件过期后会自动清理上传文件和输出文件，处理记录仍会保留到记录过期时间；记录页会显示“文件已清理”，并隐藏下载入口。
 
+## 编码性能
+
+服务端固定使用 CPU 编码。默认优先处理速度，H.264 使用 `veryfast`，H.265 使用 `fast`。如果更在意文件体积，可以在服务器环境变量中调慢 preset：
+
+```bash
+export VIDEO_PROCESSOR_H264_PRESET=veryfast
+export VIDEO_PROCESSOR_H265_PRESET=fast
+export VIDEO_PROCESSOR_MKV_PRESET=veryfast
+```
+
+可选值：`ultrafast`、`superfast`、`veryfast`、`faster`、`fast`、`medium`、`slow`、`slower`、`veryslow`、`placebo`。越靠前速度越快，文件可能更大；越靠后压缩更充分，但处理更慢。
+
 ## 企业微信通知
 
 配置群机器人 Webhook 后，任务全部完成、存在失败或被取消时会发送通知。Webhook 是密钥，只应配置在服务器环境变量中，不能写入代码或提交到 Git：
@@ -91,7 +103,7 @@ export VIDEO_PROCESSOR_PUBLIC_URL='http://服务器IP:8899'
 ```
 
 `VIDEO_PROCESSOR_PUBLIC_URL` 为可选项；设置后，完成通知会附带打开处理记录页面的链接。
-部署后可以在“处理记录”页面点击“测试通知”验证机器人是否可用。如果提示 webhook 缺少完整 key，请检查面板里的环境变量是否保存成了完整的 `...send?key=xxxx`。
+如果提示 webhook 缺少完整 key，请检查面板里的环境变量是否保存成了完整的 `...send?key=xxxx`。
 如果提示 `CERTIFICATE_VERIFY_FAILED`，程序会自动使用企业微信专用 TLS 兼容模式重试；仍建议在项目环境中重新执行 `pip install -r requirements-web.txt`，并确认 Ubuntu 已安装 `ca-certificates`。
 
 ### 可选访问保护
