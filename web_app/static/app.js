@@ -130,7 +130,9 @@ function showToast(message, tone = "success") {
 
 function showLoginDialog(message = "") {
   loginError.textContent = message;
+  const wasHidden = loginDialog.hidden;
   loginDialog.hidden = false;
+  if (!wasHidden && loginForm.contains(document.activeElement)) return;
   requestAnimationFrame(() => {
     if (!loginUser.value) {
       loginUser.focus();
