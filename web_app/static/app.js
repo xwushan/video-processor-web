@@ -526,7 +526,6 @@ function readVideoMeta(file) {
 
 async function renderSelectedVideos() {
   revokeVideoUrls();
-  selectedVideosEl.innerHTML = "";
   selectedVideosEl.classList.toggle("empty", selectedFiles.length === 0);
   const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
   const stats = folderStats(selectedFiles);
@@ -543,13 +542,20 @@ async function renderSelectedVideos() {
     return;
   }
 
+  const total = selectedFiles.length;
+  selectedVideosEl.innerHTML = `<div class="video-loading">正在分析视频信息... <span class="loading-progress">0 / ${total}</span></div>`;
+
   const items = [];
-  for (let index = 0; index < selectedFiles.length; index += 1) {
+  for (let index = 0; index < total; index += 1) {
     const file = selectedFiles[index];
     const displayPath = relativePathFor(file);
     const meta = await readVideoMeta(file);
     if (index === 0) setupPreviewVideo(meta);
     items.push({ file, meta, index, path: displayPath });
+    // 每处理 5 个或最后一个时更新进度（避免频繁 DOM 操作）
+    if ((index + 1) % 5 === 0 || index === total - 1) {
+      selectedVideosEl.innerHTML = `<div class="video-loading">正在分析视频信息... <span class="loading-progress">${index + 1} / ${total}</span></div>`;
+    }
   }
   const tree = buildFileTree(items, item => item.path);
   selectedVideosEl.innerHTML = renderTreeNodes(tree, {
