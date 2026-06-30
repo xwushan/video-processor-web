@@ -9,6 +9,7 @@ const configText = document.querySelector("#configText");
 const recordsFeedback = document.querySelector("#recordsFeedback");
 const videoInput = document.querySelector("#videoInput");
 const folderInput = document.querySelector("#folderInput");
+const compareFolderInput = document.querySelector("#compareFolderInput");
 const videoDropZone = document.querySelector("#videoDropZone");
 const videoPickerMeta = document.querySelector("#videoPickerMeta");
 const selectedSummary = document.querySelector("#selectedSummary");
@@ -427,6 +428,7 @@ async function clearSelectedVideoList() {
   selectedFiles = [];
   syncFileInput();
   folderInput.value = "";
+  if (compareFolderInput) compareFolderInput.value = "";
   await renderSelectedVideos();
 }
 
@@ -454,6 +456,61 @@ function addVideoFiles(files) {
     }
   }
   syncFileInput();
+}
+
+function dedupVideoFiles(files) {
+  console.log(`[对比上传] 收到 ${files.length} 个文件`);
+  const videoFiles = [];
+  for (const file of files) {
+    const isVideo = file.type.startsWith("video/") || /\.(mp4|m4v|mov|avi|mkv|webm|flv|wmv|ts)$/i.test(file.name);
+    if (isVideo) videoFiles.push(file);
+  }
+  console.log(`[对比上传] 视频文件 ${videoFiles.length} 个:`, videoFiles.map(f => `${relativePathFor(f)} (${f.name})`));
+
+  // 计算每个文件的「包含文件夹」和「祖父路径」
+  // 只有同一祖父路径下的兄弟文件夹之间才进行比较去重
+  const fileInfo = videoFiles.map(file => {
+    const path = relativePathFor(file);
+    const parts = path.split("/").filter(Boolean);
+    const fileName = parts.pop() || file.name;
+    const containingFolder = parts.join("/") || "(根目录)";
+    const gpParts = parts.slice(0, -1);
+    const grandparent = gpParts.join("/") || "(根目录)";
+    return { file, fileName, containingFolder, grandparent };
+  });
+
+  // 按 (祖父路径 + 文件名) 分组，统计每个分组出现在哪些包含文件夹中
+  const groups = new Map();
+  for (const info of fileInfo) {
+    const groupKey = `${info.grandparent}|${info.fileName.toLowerCase()}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, new Set());
+    groups.get(groupKey).add(info.containingFolder);
+  }
+
+  console.log(`[对比上传] 去重分组:`, [...groups.entries()].map(([k, v]) => `  ${k}: [${[...v].join(", ")}] (${v.size}个文件夹)`));
+
+  const unique = [];
+  const skipped = [];
+
+  for (const info of fileInfo) {
+    const groupKey = `${info.grandparent}|${info.fileName.toLowerCase()}`;
+    if (groups.get(groupKey).size > 1) {
+      skipped.push(info.file);
+    } else {
+      unique.push(info.file);
+    }
+  }
+
+  console.log(`[对比上传] 结果: 保留 ${unique.length} 个, 跳过 ${skipped.length} 个`);
+  console.log(`[对比上传] 保留:`, unique.map(f => relativePathFor(f)));
+  console.log(`[对比上传] 跳过:`, skipped.map(f => relativePathFor(f)));
+
+  if (skipped.length > 0) {
+    const duplicateNames = [...new Set(skipped.map(f => f.name))].join("、");
+    console.log(`[对比上传] 跳过 ${skipped.length} 个重复视频 (${duplicateNames})`);
+  }
+
+  return { unique, skipped };
 }
 
 function revokeVideoUrls() {
@@ -484,7 +541,6 @@ function readVideoMeta(file) {
 
 async function renderSelectedVideos() {
   revokeVideoUrls();
-  selectedVideosEl.innerHTML = "";
   selectedVideosEl.classList.toggle("empty", selectedFiles.length === 0);
   const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
   const stats = folderStats(selectedFiles);
@@ -501,13 +557,20 @@ async function renderSelectedVideos() {
     return;
   }
 
+  const total = selectedFiles.length;
+  selectedVideosEl.innerHTML = `<div class="video-loading">正在分析视频信息... <span class="loading-progress">0 / ${total}</span></div>`;
+
   const items = [];
-  for (let index = 0; index < selectedFiles.length; index += 1) {
+  for (let index = 0; index < total; index += 1) {
     const file = selectedFiles[index];
     const displayPath = relativePathFor(file);
     const meta = await readVideoMeta(file);
     if (index === 0) setupPreviewVideo(meta);
     items.push({ file, meta, index, path: displayPath });
+    // 每处理 5 个或最后一个时更新进度（避免频繁 DOM 操作）
+    if ((index + 1) % 5 === 0 || index === total - 1) {
+      selectedVideosEl.innerHTML = `<div class="video-loading">正在分析视频信息... <span class="loading-progress">${index + 1} / ${total}</span></div>`;
+    }
   }
   const tree = buildFileTree(items, item => item.path);
   selectedVideosEl.innerHTML = renderTreeNodes(tree, {
@@ -1145,6 +1208,25 @@ folderInput.addEventListener("change", async () => {
   if (controlsLocked) return;
   addVideoFiles(Array.from(folderInput.files || []));
   folderInput.value = "";
+  await renderSelectedVideos();
+});
+
+compareFolderInput.addEventListener("change", async () => {
+  if (controlsLocked) return;
+  console.log(`[对比上传] 开始处理，当前已有 ${selectedFiles.length} 个文件`);
+  const allFiles = Array.from(compareFolderInput.files || []);
+  console.log(`[对比上传] 从文件夹选择器获得 ${allFiles.length} 个文件`);
+  const { unique, skipped } = dedupVideoFiles(allFiles);
+  console.log(`[对比上传] 去重后准备添加 ${unique.length} 个文件到列表`);
+  addVideoFiles(unique);
+  console.log(`[对比上传] 添加后列表共有 ${selectedFiles.length} 个文件`);
+  compareFolderInput.value = "";
+  if (skipped.length > 0) {
+    showToast(`已自动跳过 ${skipped.length} 个重复视频`, "warning");
+  }
+  if (unique.length > 0) {
+    showToast(`已添加 ${unique.length} 个不重复视频`);
+  }
   await renderSelectedVideos();
 });
 
