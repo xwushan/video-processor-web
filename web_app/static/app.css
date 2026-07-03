@@ -1286,7 +1286,7 @@ button.danger:hover {
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 90px 90px 86px;
+  grid-template-columns: minmax(0, 1fr) 90px 90px 68px 52px;
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
@@ -1307,8 +1307,25 @@ button.danger:hover {
   border-radius: 8px;
   background: #fff1f3;
   color: #c92445;
-  box-shadow: none;
-  white-space: nowrap;
+}
+
+.play-video {
+  justify-self: center;
+  width: 44px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #c3d8f0;
+  border-radius: 8px;
+  background: #eaf3fd;
+  color: var(--primary-dark);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.play-video:hover {
+  background: #d6e9fb;
+  border-color: var(--primary);
 }
 
 .show-error-detail:hover {

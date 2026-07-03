@@ -2133,6 +2133,23 @@ def download_file(job_id: str, file_id: str):
     return FileResponse(path, filename=path.name)
 
 
+@app.get("/api/jobs/{job_id}/files/{file_id}/play")
+def play_file(job_id: str, file_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    with db_lock, db_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM job_files WHERE id=? AND job_id=?", (file_id, job_id)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    path = Path(row["output_path"])
+    if not is_safe_child(path, Path(job["output_dir"])) or not path.exists():
+        raise HTTPException(status_code=410, detail="文件已清理或不存在")
+    return FileResponse(path)
+
+
 @app.post("/api/jobs/{job_id}/archive")
 def start_archive(job_id: str) -> dict:
     job = get_job(job_id)

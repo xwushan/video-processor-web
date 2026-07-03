@@ -867,6 +867,9 @@ async function loadJobs() {
           : hasError
             ? `<button class="show-error-detail" type="button" data-error-key="${escapeHtml(errorKey)}">失败详情</button>`
             : `<span class="meta">${fileCleaned ? "文件已自动删除" : "-"}</span>`;
+        const play = canDownload
+          ? `<button class="play-video" type="button" data-job-id="${escapeHtml(job.id)}" data-file-id="${escapeHtml(file.id)}" data-name="${escapeHtml(entry.name)}">播放</button>`
+          : "";
         return `
           <div class="file record-tree-file" style="--tree-depth:${depth}">
             <div>
@@ -876,6 +879,7 @@ async function loadJobs() {
             <span class="status-${displayStatus}">${statusText(displayStatus)}</span>
             <span>${displayProgress(file.progress, file.status === "done")}%</span>
             ${download}
+            ${play}
           </div>
         `;
       },
@@ -1501,6 +1505,18 @@ jobsEl.addEventListener("click", async (event) => {
   const errorButton = event.target.closest(".show-error-detail");
   if (errorButton) {
     showErrorDetail(recordErrorDetails.get(errorButton.dataset.errorKey));
+    return;
+  }
+
+  const playButton = event.target.closest(".play-video");
+  if (playButton) {
+    const jobId = playButton.dataset.jobId;
+    const fileId = playButton.dataset.fileId;
+    const name = playButton.dataset.name;
+    videoPreviewTitle.textContent = name;
+    videoPreviewPlayer.src = `/api/jobs/${jobId}/files/${fileId}/play`;
+    videoPreviewDialog.hidden = false;
+    videoPreviewPlayer.play().catch(() => {});
     return;
   }
 
