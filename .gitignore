@@ -19,3 +19,6 @@ data/
 # Local verification screenshots and dependency reports are recorded in Markdown.
 deploy/*.jpg
 deploy/dependency-audit-*.json
+# Deployment backups and exported images must stay out of Git.
+/backups/
+/video-processor*.tar*
