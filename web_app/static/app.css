@@ -33,9 +33,11 @@
 .sample-controls button[aria-pressed="true"] { color: white; background: var(--primary); }
 #sizeEstimateResult.stale { opacity: 0.5; }
 #jobForm.is-estimating #sizeEstimatePanel { pointer-events: auto; }
+#jobForm.is-estimating .estimate-params-actions { pointer-events: auto; }
 #jobForm.is-estimating #lockBanner { border-color: var(--line); }
 @media (max-width: 640px) {
   #sizeEstimatePanel > .row { align-items: flex-start; flex-direction: column; gap: 10px; }
+  #sizeEstimatePanel .estimate-actions, #startProductionBtn { width: 100%; }
 }
 
 * {
@@ -374,14 +376,47 @@ form {
 }
 
 .sub-panel {
-  border: 0;
+  border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 10px 24px rgba(43, 78, 116, 0.06);
-  padding: 18px 16px;
+  background: var(--card);
+  box-shadow: 0 6px 18px rgba(43, 78, 116, 0.06);
+  padding: 20px;
   display: grid;
   gap: 16px;
 }
+
+.module-heading {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.module-heading:not(.row), .size-estimate .section-heading {
+  display: grid;
+  gap: 7px;
+}
+
+.module-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #23476e;
+}
+
+.module-heading h2::before {
+  content: "";
+  flex: 0 0 4px;
+  height: 22px;
+  border-radius: 3px;
+  background: var(--primary);
+}
+
+.size-estimate.sub-panel {
+  border-color: #b6d4f6;
+  box-shadow: 0 8px 24px rgba(31, 115, 238, 0.08);
+}
+
+#startProductionBtn { min-width: 150px; }
+.estimate-params-actions { display: grid; gap: 8px; }
 
 .process-layout {
   display: grid;
@@ -391,8 +426,9 @@ form {
     "preview params"
     "estimate estimate";
   align-items: stretch;
-  gap: 16px;
-  padding: 16px;
+  gap: 20px;
+  padding: 20px;
+  background: var(--soft);
 }
 
 .video-panel {
@@ -433,7 +469,7 @@ form {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.process-params-panel button[type="submit"] {
+.process-params-panel #estimateSizeBtn {
   width: 100%;
 }
 

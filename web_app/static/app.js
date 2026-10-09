@@ -45,6 +45,8 @@ const uploadProgress = document.querySelector("#uploadProgress");
 const uploadProgressBar = uploadProgress.querySelector(".bar i");
 const uploadProgressText = uploadProgress.querySelector("strong");
 const estimateSizeBtn = document.querySelector("#estimateSizeBtn");
+const startProductionBtn = document.querySelector("#startProductionBtn");
+const productionReadyHint = document.querySelector("#productionReadyHint");
 const cancelEstimateBtn = document.querySelector("#cancelEstimateBtn");
 const sizeEstimateHint = document.querySelector("#sizeEstimateHint");
 const sizeEstimateResult = document.querySelector("#sizeEstimateResult");
@@ -452,6 +454,8 @@ function setControlsLocked(locked) {
     : "当前任务未完成前，视频列表和水印参数会保持不变，避免处理结果和记录错位。";
   estimateSizeBtn.disabled = locked || !selectedFiles.length;
   cancelEstimateBtn.hidden = !estimateBusy;
+  estimateSizeBtn.textContent = estimateBusy ? "正在预估…" : "预估成品";
+  updateProductionAvailability();
   previewWatermark.style.pointerEvents = locked ? "none" : "auto";
   previewDynamicWatermark.style.pointerEvents = "none";
 }
@@ -1377,8 +1381,24 @@ function sizeEstimateSignature() {
   return JSON.stringify([uploadFingerprint(), params]);
 }
 
+function hasCurrentEstimate() {
+  return Boolean(selectedFiles.length && estimateSignature && estimatePreviewState?.state.status === "done"
+    && estimateSignature === sizeEstimateSignature());
+}
+
+function updateProductionAvailability() {
+  const ready = !controlsLocked && hasCurrentEstimate();
+  startProductionBtn.disabled = !ready;
+  productionReadyHint.textContent = estimateBusy ? "正在预估，完成后可确认大小和样片。"
+    : jobControlsLocked ? "当前任务正在制作，完成后可进行下一次预估。"
+    : ready ? "预估已完成，确认下方大小和样片后即可开始制作。"
+    : estimateSignature ? "视频或参数已更改，请重新预估后再开始制作。"
+    : "请先在处理参数中点击“预估成品”。";
+}
+
 function invalidateSizeEstimate() {
   estimateSizeBtn.disabled = controlsLocked || !selectedFiles.length;
+  updateProductionAvailability();
   if (estimateBusy || !estimateSignature) return;
   const stale = estimateSignature !== sizeEstimateSignature();
   sizeEstimateResult.classList.toggle("stale", stale);
@@ -1421,6 +1441,8 @@ estimateSizeBtn.addEventListener("click", async () => {
   const signature = sizeEstimateSignature();
   const data = processingFormData();
   if (activeEstimatePreview) closeVideoPreview();
+  estimateSignature = null;
+  estimatePreviewState = null;
   estimateBusy = true;
   estimateCancelRequested = false;
   estimateSessionId = null;
@@ -1450,6 +1472,9 @@ estimateSizeBtn.addEventListener("click", async () => {
     renderSizeEstimate(state, estimateSessionId);
     estimateSignature = (state.files || []).some(file => file.samples?.length) ? signature : null;
     if (state.status === "done") sizeEstimateHint.textContent = "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
+    if (state.files?.length) requestAnimationFrame(() => document.querySelector("#sizeEstimatePanel").scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start",
+    }));
   } catch (error) {
     sizeEstimateHint.textContent = estimateCancelRequested
       ? "已取消上传，已传分块可在下次预估或制作时继续使用。" : error.message;
@@ -1648,14 +1673,19 @@ form.addEventListener("submit", async (event) => {
     alert("请先选择视频文件");
     return;
   }
+  if (!hasCurrentEstimate()) {
+    updateProductionAvailability();
+    showToast("请先按当前参数预估成品，确认大小和画质后再开始制作。", "warning");
+    return;
+  }
   const kind = outputFormat.value === "h265" ? "h265" : "h264";
   if (encoderDevice.value === "nvidia" && !encodingConfig?.gpu?.codecs?.[kind]?.available) {
     showToast("当前格式的 GPU 编码不可用，请先选择自动或 CPU 编码。", "error");
     return;
   }
   saveEncodingSettings();
-  const submit = form.querySelector("button[type=submit]");
-  submit.textContent = "正在上传...";
+  const submit = startProductionBtn;
+  submit.textContent = "正在创建任务…";
   setUploadProgress(0);
   try {
     const data = processingFormData();
@@ -1671,7 +1701,7 @@ form.addEventListener("submit", async (event) => {
     alert(error.message);
   } finally {
     submit.textContent = "开始制作";
-    submit.disabled = false;
+    updateProductionAvailability();
     setTimeout(() => { uploadProgress.hidden = true; }, 1000);
   }
 });

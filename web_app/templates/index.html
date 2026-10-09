@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20261009-sample-preview">
+  <link rel="stylesheet" href="/static/app.css?v=20261009-estimate-first">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -79,7 +79,7 @@
         </div>
         <div class="process-layout">
         <section class="sub-panel video-panel">
-          <div class="row between">
+          <div class="row between module-heading">
             <div class="section-heading">
               <h2>1. 视频文件</h2>
               <p id="selectedSummary">选择后会先在这里展示待处理列表，确认参数后再开始上传制作</p>
@@ -110,7 +110,7 @@
         </section>
 
         <section class="sub-panel watermark-panel">
-          <div class="section-heading">
+          <div class="section-heading module-heading">
             <h2>2. 水印基础参数</h2>
             <p>固定水印适合常驻品牌标识，动态水印适合随机位置防录屏</p>
           </div>
@@ -165,7 +165,7 @@
         </section>
 
         <section class="sub-panel preview-panel">
-          <div class="row between">
+          <div class="row between module-heading">
             <div>
               <h2>3. 水印预览</h2>
               <p id="previewHint" class="meta">选择视频后显示固定与动态水印，固定水印可拖动定位</p>
@@ -188,7 +188,10 @@
         </section>
 
         <section class="sub-panel process-params-panel">
-          <h2>4. 处理参数</h2>
+          <div class="module-heading">
+            <h2>4. 处理参数</h2>
+            <p class="meta">设置完成后，先预估成品大小并查看处理后的画质。</p>
+          </div>
           <div class="grid three">
             <label>编码设备
               <select id="encoderDevice" name="encoder_device">
@@ -227,15 +230,20 @@
             <p id="gpuSchedulingHint" class="param-hint" hidden>GPU 并发自动调节：目标 80%，达到阈值后停止新增任务。</p>
             <p id="encoderDeviceHint" class="param-hint">正在检测服务器编码设备…</p>
             <p id="encoderPresetHint" class="param-hint">速度优先适合批量处理，编码速度更快，文件体积可能略大。</p>
-            <button type="submit">开始制作</button>
+            <div class="estimate-params-actions">
+              <button id="estimateSizeBtn" type="button" disabled>预估成品</button>
+              <button id="cancelEstimateBtn" type="button" class="text" hidden>取消预估</button>
+            </div>
           </div>
         </section>
         <section id="sizeEstimatePanel" class="sub-panel size-estimate">
-            <div class="row between">
-              <h2>5. 预计成品大小</h2>
+            <div class="row between module-heading">
+              <div class="section-heading">
+                <h2>5. 预计成品大小</h2>
+                <p id="productionReadyHint" class="meta" role="status">请先在处理参数中点击“预估成品”。</p>
+              </div>
               <div class="estimate-actions">
-                <button id="estimateSizeBtn" type="button" class="ghost" disabled>预估成品大小</button>
-                <button id="cancelEstimateBtn" type="button" class="text" hidden>取消预估</button>
+                <button id="startProductionBtn" type="submit" aria-describedby="productionReadyHint" disabled>开始制作</button>
               </div>
             </div>
             <p id="sizeEstimateHint" class="meta" role="status">根据当前编码和水印参数抽样试编码，点击结果中的缩略图查看处理后的画质。需先上传视频，开始制作时可复用上传；大小为参考值。</p>
@@ -328,6 +336,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=20261009-sample-preview"></script>
+  <script src="/static/app.js?v=20261009-estimate-first"></script>
 </body>
 </html>
