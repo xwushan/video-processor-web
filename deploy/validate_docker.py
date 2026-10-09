@@ -127,8 +127,24 @@ def main():
                 assert error.code == 400
         fields.update(encoder_device='auto', format_type='h265')
         body, headers = multipart(fields)
+        estimate_path = f'/api/uploads/{session_id}/estimate'
+        estimate = payload(estimate_path, data=body, headers=headers)
+        for _ in range(120):
+            if estimate['status'] not in ('running', 'canceling'):
+                break
+            time.sleep(.25)
+            estimate = payload(estimate_path)
+        assert estimate['status'] == 'done', estimate
+        assert estimate['files'][0]['full_trial'], estimate
+        assert estimate['files'][0]['encoder_device'] == ('nvidia' if args.gpu else 'cpu'), estimate
+        cached = payload(estimate_path, data=body, headers=headers)
+        assert cached['id'] == estimate['id'] and cached['status'] == 'done', cached
+        assert payload('/api/current-job')['job'] is None, 'Estimation must not create a processing job'
         job_id = payload(f'/api/uploads/{session_id}/complete', data=body, headers=headers)['id']
-        verify(job_id, 'h265', 'nvidia' if args.gpu else 'cpu')
+        file, _ = verify(job_id, 'h265', 'nvidia' if args.gpu else 'cpu')
+        output_size = int(command('stat', '-c', '%s', file['output_path']))
+        assert estimate['totals']['min_bytes'] <= output_size <= estimate['totals']['max_bytes'], (estimate, output_size)
+        print('PASS: size estimation includes audio/watermarks, caches matching parameters, and reuses uploads for actual encoding', flush=True)
         print('PASS: resumable upload preserves GPU parameters; strict GPU rejection does not lock the upload session', flush=True)
 
         command('ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:size=320x240:rate=15',

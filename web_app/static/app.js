@@ -44,6 +44,10 @@ const previewHint = document.querySelector("#previewHint");
 const uploadProgress = document.querySelector("#uploadProgress");
 const uploadProgressBar = uploadProgress.querySelector(".bar i");
 const uploadProgressText = uploadProgress.querySelector("strong");
+const estimateSizeBtn = document.querySelector("#estimateSizeBtn");
+const cancelEstimateBtn = document.querySelector("#cancelEstimateBtn");
+const sizeEstimateHint = document.querySelector("#sizeEstimateHint");
+const sizeEstimateResult = document.querySelector("#sizeEstimateResult");
 const currentProgressText = document.querySelector("#currentProgressText");
 const currentProgressBar = document.querySelector("#currentProgressBar");
 const currentJobMeta = document.querySelector("#currentJobMeta");
@@ -104,6 +108,14 @@ let previewVideoMeta = null;
 let draggingWatermark = false;
 let currentJobId = localStorage.getItem("currentJobId");
 let controlsLocked = false;
+let jobControlsLocked = false;
+let estimateBusy = false;
+let estimateSignature = null;
+let estimateUploadController = null;
+let estimateSessionId = null;
+let estimateCancelRequested = false;
+let uploadSessionMemory = null;
+let completedUploadFingerprint = null;
 let recordsSignature = "";
 let expandedJobs = new Set(JSON.parse(localStorage.getItem("expandedJobs") || "[]"));
 let collapsedTreeFolders = new Set(JSON.parse(localStorage.getItem("collapsedTreeFolders") || "[]"));
@@ -372,15 +384,28 @@ function showPage(name) {
 }
 
 function setControlsLocked(locked) {
+  jobControlsLocked = locked;
+  locked = locked || estimateBusy;
   controlsLocked = locked;
   form.classList.toggle("is-locked", locked);
-  form.setAttribute("aria-disabled", locked ? "true" : "false");
+  form.classList.toggle("is-estimating", estimateBusy);
+  // aria-disabled on the form also disables its cancellation control for
+  // assistive technology. During estimation the capture guard locks fields.
+  form.setAttribute("aria-disabled", locked && !estimateBusy ? "true" : "false");
+  form.setAttribute("aria-busy", estimateBusy ? "true" : "false");
+  const banner = document.querySelector("#lockBanner");
+  banner.querySelector("strong").textContent = estimateBusy ? "正在预估，参数已锁定" : "制作中，参数已锁定";
+  banner.querySelector("span").textContent = estimateBusy
+    ? "正在上传或试编码，可取消预估；完成后可修改参数或开始制作。"
+    : "当前任务未完成前，视频列表和水印参数会保持不变，避免处理结果和记录错位。";
+  estimateSizeBtn.disabled = locked || !selectedFiles.length;
+  cancelEstimateBtn.hidden = !estimateBusy;
   previewWatermark.style.pointerEvents = locked ? "none" : "auto";
   previewDynamicWatermark.style.pointerEvents = "none";
 }
 
 function setProcessingVisible(visible) {
-  form.classList.toggle("is-processing", visible);
+  form.classList.toggle("is-processing", visible && !estimateBusy);
 }
 
 function scrollToProcessingProgress() {
@@ -606,6 +631,7 @@ function readVideoMeta(file) {
 }
 
 async function renderSelectedVideos() {
+  invalidateSizeEstimate();
   revokeVideoUrls();
   selectedVideosEl.classList.toggle("empty", selectedFiles.length === 0);
   const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
@@ -658,7 +684,7 @@ async function renderSelectedVideos() {
           <span>${resolution}</span>
           <span>${fmtDuration(meta.duration)}</span>
           <span>${fmtSize(file.size)}</span>
-          <span>待上传</span>
+          <span>${completedUploadFingerprint === uploadFingerprint() ? "已上传" : "待上传"}</span>
           <button class="text remove-video" type="button" data-index="${index}">删除</button>
         </div>
       `;
@@ -704,6 +730,7 @@ function computedPositionValue() {
 
 function updatePositionField() {
   fixedWatermarkPos.value = computedPositionValue();
+  invalidateSizeEstimate();
 }
 
 function previewVideoMetrics() {
@@ -1203,22 +1230,22 @@ async function readJsonResponse(response, fallback) {
   return payload;
 }
 
-async function initOrResumeUpload() {
+async function initOrResumeUpload(signal) {
   const fingerprint = uploadFingerprint();
-  let saved = null;
+  let saved = uploadSessionMemory;
   try {
-    saved = JSON.parse(localStorage.getItem(uploadSessionStorageKey) || "null");
-  } catch {
-    localStorage.removeItem(uploadSessionStorageKey);
-  }
+    saved = saved || JSON.parse(localStorage.getItem(uploadSessionStorageKey) || "null");
+  } catch { /* Use the in-memory session if browser storage is unavailable. */ }
   if (saved?.fingerprint === fingerprint && saved?.id) {
-    const response = await fetch(`/api/uploads/${saved.id}`);
+    const response = await fetch(`/api/uploads/${saved.id}`, { signal });
     if (response.ok) return { fingerprint, session: await response.json() };
-    localStorage.removeItem(uploadSessionStorageKey);
+    try { localStorage.removeItem(uploadSessionStorageKey); } catch { /* Storage is optional. */ }
+    uploadSessionMemory = null;
   }
   const response = await fetch("/api/uploads/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({
       files: selectedFiles.map(file => ({
         path: relativePathFor(file),
@@ -1228,12 +1255,13 @@ async function initOrResumeUpload() {
     }),
   });
   const session = await readJsonResponse(response, "无法创建上传会话");
-  localStorage.setItem(uploadSessionStorageKey, JSON.stringify({ id: session.id, fingerprint }));
+  uploadSessionMemory = { id: session.id, fingerprint };
+  try { localStorage.setItem(uploadSessionStorageKey, JSON.stringify(uploadSessionMemory)); } catch { /* Storage is optional. */ }
   return { fingerprint, session };
 }
 
-async function uploadSelectedFilesResumable() {
-  const { session } = await initOrResumeUpload();
+async function uploadSelectedFilesResumable(signal) {
+  const { session } = await initOrResumeUpload(signal);
   const chunkSize = Number(session.chunk_size) || 8 * 1024 * 1024;
   const totalBytes = selectedFiles.reduce((total, file) => total + file.size, 0);
   let uploadedBytes = receivedUploadBytes(selectedFiles, session.files, chunkSize);
@@ -1249,13 +1277,15 @@ async function uploadSelectedFilesResumable() {
       const chunk = file.slice(start, Math.min(file.size, start + chunkSize));
       const response = await fetch(
         `/api/uploads/${session.id}/chunks/${fileIndex}/${chunkIndex}`,
-        { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: chunk },
+        { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: chunk, signal },
       );
       await readJsonResponse(response, "上传分块失败，请检查网络后重试");
       uploadedBytes += chunk.size;
       setUploadProgress(totalBytes ? uploadedBytes / totalBytes * 100 : 100);
     }
   }
+  completedUploadFingerprint = uploadFingerprint();
+  for (const cell of selectedVideosEl.querySelectorAll(".video-row > span:last-of-type")) cell.textContent = "已上传";
   return session.id;
 }
 
@@ -1265,9 +1295,128 @@ async function createJobWithProgress(data) {
   data.delete("video_paths");
   const response = await fetch(`/api/uploads/${sessionId}/complete`, { method: "POST", body: data });
   const created = await readJsonResponse(response, "上传完成后创建任务失败");
-  localStorage.removeItem(uploadSessionStorageKey);
+  uploadSessionMemory = null;
+  try { localStorage.removeItem(uploadSessionStorageKey); } catch { /* Storage is optional. */ }
   return created;
 }
+
+function processingFormData() {
+  const data = new FormData(form);
+  for (const name of encodingFields) data.set(name, form.elements.namedItem(name).value);
+  data.delete("videos");
+  data.delete("video_paths");
+  data.delete("fixed_watermark_preset");
+  data.set("fixed_watermark_pos", fixedWatermarkPos.value);
+  for (const box of form.querySelectorAll("input[type=checkbox]")) {
+    data.set(box.name, box.checked ? "true" : "false");
+  }
+  return data;
+}
+
+function sizeEstimateSignature() {
+  const params = [...processingFormData()].map(([name, value]) =>
+    [name, value instanceof File ? (value.name ? `${value.name}|${value.size}|${value.lastModified}` : "default") : value]);
+  return JSON.stringify([uploadFingerprint(), params]);
+}
+
+function invalidateSizeEstimate() {
+  estimateSizeBtn.disabled = controlsLocked || !selectedFiles.length;
+  if (estimateBusy || !estimateSignature) return;
+  const stale = estimateSignature !== sizeEstimateSignature();
+  sizeEstimateResult.classList.toggle("stale", stale);
+  sizeEstimateHint.textContent = stale
+    ? "视频或参数已修改，上次结果仅供对照，请重新预估。"
+    : "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
+}
+
+function renderSizeEstimate(state) {
+  sizeEstimateHint.textContent = state.message || "正在预估…";
+  const files = state.files || [];
+  if (!files.length) return;
+  const total = state.totals;
+  const ratio = total ? (1 - total.estimated_bytes / total.original_bytes) * 100 : 0;
+  const summary = total
+    ? `<p class="estimate-summary">整批预计 <strong>${fmtSize(total.estimated_bytes)}</strong> · 参考范围 ${fmtSize(total.min_bytes)} ～ ${fmtSize(total.max_bytes)}<br><span class="meta">原始 ${fmtSize(total.original_bytes)} · 预计${ratio >= 0 ? "减少" : "增大"} ${Math.abs(ratio).toFixed(1)}%</span></p>`
+    : "";
+  sizeEstimateResult.innerHTML = summary + `<div class="estimate-table-wrap" tabindex="0" aria-label="视频体积预估结果，可横向滚动"><table class="estimate-table">
+    <thead><tr><th>视频</th><th>原始大小</th><th>预计大小</th><th>参考范围</th><th>实际试编码器</th></tr></thead>
+    <tbody>${files.map(file => `<tr><td>${escapeHtml(file.path)}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
+      ? `<td colspan="3">${escapeHtml(file.error)}</td>`
+      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${escapeHtml(file.encoder_name)}${file.full_trial ? " · 完整试编码" : " · 3 段抽样"}${file.fallback_reason ? " · 已回退 CPU" : ""}</td>`}</tr>`).join("")}
+    </tbody></table></div>`;
+  sizeEstimateResult.hidden = false;
+}
+
+estimateSizeBtn.addEventListener("click", async () => {
+  if (controlsLocked || !selectedFiles.length) return;
+  updatePositionField();
+  if (!form.reportValidity()) return;
+  const signature = sizeEstimateSignature();
+  const data = processingFormData();
+  estimateBusy = true;
+  estimateCancelRequested = false;
+  estimateSessionId = null;
+  estimateUploadController = new AbortController();
+  cancelEstimateBtn.disabled = false;
+  setControlsLocked(false);
+  sizeEstimateResult.hidden = true;
+  sizeEstimateResult.classList.remove("stale");
+  sizeEstimateHint.textContent = "正在上传视频，上传完成后抽样预估…";
+  setUploadProgress(0);
+  let terminal = false;
+  try {
+    estimateSessionId = await uploadSelectedFilesResumable(estimateUploadController.signal);
+    if (estimateCancelRequested) return;
+    uploadProgress.hidden = true;
+    const response = await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "POST", body: data });
+    let state = await readJsonResponse(response, "无法开始体积预估");
+    if (estimateCancelRequested && state.status === "running") {
+      await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" });
+    }
+    while (["running", "canceling"].includes(state.status)) {
+      sizeEstimateHint.textContent = `${state.message}（${state.progress || 0}%）`;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      state = await readJsonResponse(await fetch(`/api/uploads/${estimateSessionId}/estimate`), "读取预估进度失败");
+    }
+    terminal = true;
+    renderSizeEstimate(state);
+    estimateSignature = state.status === "done" ? signature : null;
+    if (state.status === "done") sizeEstimateHint.textContent = "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
+  } catch (error) {
+    sizeEstimateHint.textContent = estimateCancelRequested
+      ? "已取消上传，已传分块可在下次预估或制作时继续使用。" : error.message;
+  } finally {
+    // A lost polling connection must not leave an invisible trial running.
+    if (estimateSessionId && !terminal) {
+      try { await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" }); } catch { /* Retry is possible after reconnection. */ }
+    }
+    estimateBusy = false;
+    estimateUploadController = null;
+    estimateSessionId = null;
+    setControlsLocked(jobControlsLocked);
+    setProcessingVisible(jobControlsLocked);
+    uploadProgress.hidden = true;
+  }
+});
+
+cancelEstimateBtn.addEventListener("click", async () => {
+  estimateCancelRequested = true;
+  cancelEstimateBtn.disabled = true;
+  sizeEstimateHint.textContent = "正在取消预估…";
+  estimateUploadController?.abort();
+  if (estimateSessionId) {
+    try {
+      const response = await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) throw new Error("取消请求未成功，将继续显示预估进度");
+    } catch (error) {
+      sizeEstimateHint.textContent = error.message;
+      cancelEstimateBtn.disabled = false;
+    }
+  }
+});
+
+form.addEventListener("input", invalidateSizeEstimate);
+form.addEventListener("change", invalidateSizeEstimate);
 
 videoInput.addEventListener("change", async () => {
   if (controlsLocked) return;
@@ -1441,20 +1590,7 @@ form.addEventListener("submit", async (event) => {
   submit.textContent = "正在上传...";
   setUploadProgress(0);
   try {
-    const data = new FormData(form);
-    // Disabled, hidden device controls still belong to this job's saved settings.
-    for (const name of encodingFields) data.set(name, form.elements.namedItem(name).value);
-    data.delete("videos");
-    data.delete("video_paths");
-    for (const file of selectedFiles) {
-      data.append("videos", file, file.name);
-      data.append("video_paths", relativePathFor(file));
-    }
-    data.delete("fixed_watermark_preset");
-    data.set("fixed_watermark_pos", fixedWatermarkPos.value);
-    for (const box of form.querySelectorAll("input[type=checkbox]")) {
-      data.set(box.name, box.checked ? "true" : "false");
-    }
+    const data = processingFormData();
     setControlsLocked(true);
     const created = await createJobWithProgress(data);
     currentJobId = created.id;
@@ -1723,6 +1859,8 @@ window.addEventListener("keydown", (event) => {
 for (const eventName of ["click", "input", "change", "keydown", "submit"]) {
   form.addEventListener(eventName, (event) => {
     if (!controlsLocked) return;
+    if (estimateBusy && event.target.closest("#cancelEstimateBtn")) return;
+    if (estimateBusy && eventName === "keydown" && event.key === "Tab") return;
     if (event.target.closest("#processingOverlay") || event.target.closest(".form-lock-banner")) return;
     event.preventDefault();
     event.stopPropagation();

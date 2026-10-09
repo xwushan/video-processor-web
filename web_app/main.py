@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hmac
+import hashlib
 import json
 import math
 import os
@@ -47,6 +48,7 @@ from web_app.encoding import (  # noqa: E402
     DEFAULT_ENCODER_DEVICE, GPU_MAX_CONCURRENT, GPU_CPU_THREADS,
     get_gpu_capabilities, get_gpu_metrics, select_encoder, is_gpu_error,
 )
+from web_app.size_estimation import EstimateCanceled, estimate_file  # noqa: E402
 
 
 APP_ROOT = Path(os.getenv("VIDEO_PROCESSOR_ROOT", "/data/video-processor"))
@@ -80,7 +82,7 @@ AUTH_USER = os.getenv("VIDEO_PROCESSOR_AUTH_USER", "admin").strip() or "admin"
 AUTH_PASSWORD = os.getenv("VIDEO_PROCESSOR_AUTH_PASSWORD", "")
 AUTH_COOKIE_NAME = "video_processor_session"
 AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 APP_REVISION = os.getenv("VIDEO_PROCESSOR_REVISION", "unknown")
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -97,6 +99,9 @@ async def lifespan(app: FastAPI):
     recover_unfinished_jobs()
     threading.Thread(target=cleanup_worker, daemon=True).start()
     yield
+    with upload_sessions_lock:
+        for event in estimation_tasks.values():
+            event.set()
 
 
 app = FastAPI(title="视频处理器", version=APP_VERSION, lifespan=lifespan)
@@ -194,6 +199,10 @@ archive_tasks: dict[str, dict] = {}
 archive_tasks_lock = threading.Lock()
 upload_sessions_lock = threading.Lock()
 completing_upload_sessions: set[str] = set()
+# Jobs already run one batch at a time. A trial shares this gate so it cannot
+# consume another NVENC session while the resource scheduler is encoding.
+encoding_work_lock = threading.Lock()
+estimation_tasks: dict[str, threading.Event] = {}
 resource_metrics_lock = threading.Lock()
 resource_metrics_previous: Optional[tuple[float, int, int]] = None
 TERMINAL_JOB_STATUS = {"done", "error", "canceled"}
@@ -1212,6 +1221,11 @@ def process_file(
 
 
 def process_job(job_id: str) -> None:
+    with encoding_work_lock:
+        _process_job(job_id)
+
+
+def _process_job(job_id: str) -> None:
     with job_control_lock:
         job = get_job(job_id)
         if not job or job["status"] != "queued":
@@ -1735,6 +1749,8 @@ async def upload_resumable_chunk(
         payload.extend(chunk)
     session_dir = upload_session_path(session_id)
     with upload_sessions_lock:
+        if session_id in completing_upload_sessions:
+            raise HTTPException(status_code=409, detail="该上传正在预估或创建任务，请稍后")
         manifest = load_upload_manifest(session_dir)
         if file_index < 0 or file_index >= len(manifest["files"]):
             raise HTTPException(status_code=404, detail="上传文件不存在")
@@ -1851,6 +1867,201 @@ def create_job_from_resumable_files(
     return job_id, upload_dir, output_dir, watermark_dir
 
 
+def read_estimate_state(session_dir: Path) -> dict:
+    try:
+        return json.loads((session_dir / "estimate.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="尚未进行体积预估")
+
+
+def write_estimate_state(session_dir: Path, state: dict) -> None:
+    target = session_dir / "estimate.json"
+    temporary = target.with_suffix(".json.part")
+    temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(target)
+    # Active sessions are also protected from retention cleanup by their lease.
+    os.utime(session_dir, None)
+
+
+def run_size_estimate(session_id, session_dir, manifest, settings, device, threads,
+                      work_dir, state, canceled):
+    terminal = "done"
+    try:
+        for index, item in enumerate(manifest["files"]):
+            if canceled.is_set():
+                raise EstimateCanceled()
+            source = session_dir / "files" / item["path"]
+            def on_sample(sample_index, count):
+                if canceled.is_set():
+                    raise EstimateCanceled()
+                state["progress"] = round((index + sample_index / count) / len(manifest["files"]) * 100)
+                state["message"] = f"{item['path']}：试编码 {sample_index + 1}/{count}"
+                with upload_sessions_lock:
+                    write_estimate_state(session_dir, state)
+            result = {"path": item["path"], "original_bytes": item["size"]}
+            try:
+                ensure_disk_headroom()
+                try:
+                    result.update(estimate_file(source, work_dir, settings, device, threads,
+                                                canceled, terminate_process, on_sample))
+                except RuntimeError as exc:
+                    if settings["encoder_device"] != "auto" or device != "nvidia" or not is_gpu_error(str(exc)):
+                        raise
+                    result.update(estimate_file(source, work_dir, settings, "cpu", recommend_ffmpeg_threads(0),
+                                                canceled, terminate_process, on_sample))
+                    result["fallback_reason"] = "GPU 试编码失败，已按 CPU 参数预估"
+            except EstimateCanceled:
+                raise
+            except Exception as exc:
+                result["error"] = str(exc)[-400:] or "预估失败"
+            state["files"].append(result)
+        good = [item for item in state["files"] if "estimated_bytes" in item]
+        state["failed_count"] = len(state["files"]) - len(good)
+        if state["failed_count"]:
+            terminal = "error"
+            state["message"] = "部分视频预估失败，请查看列表；未计算整批大小"
+        else:
+            state["totals"] = {key: sum(item[key] for item in good)
+                               for key in ("original_bytes", "estimated_bytes", "min_bytes", "max_bytes")}
+            state["message"] = "预估完成，实际大小可能超出参考范围"
+        state["progress"] = 100
+    except EstimateCanceled:
+        terminal = "canceled"
+        state["message"] = "已取消预估，已上传的视频可继续用于制作"
+    except Exception as exc:
+        terminal = "error"
+        state["message"] = f"预估失败：{str(exc)[-250:]}"
+    finally:
+        try:
+            delete_path_safely(work_dir, session_dir)
+        finally:
+            with upload_sessions_lock:
+                estimation_tasks.pop(session_id, None)
+                completing_upload_sessions.discard(session_id)
+                encoding_work_lock.release()
+                state["status"] = terminal
+                write_estimate_state(session_dir, state)
+
+
+@app.get("/api/uploads/{session_id}/estimate")
+def size_estimate_status(session_id: str) -> dict:
+    session_dir = upload_session_path(session_id)
+    with upload_sessions_lock:
+        state = read_estimate_state(session_dir)
+        if state["status"] in {"running", "canceling"} and session_id not in estimation_tasks:
+            state.update(status="error", message="服务已重启，请重新预估")
+        return state
+
+
+@app.delete("/api/uploads/{session_id}/estimate")
+def cancel_size_estimate(session_id: str) -> dict:
+    session_dir = upload_session_path(session_id)
+    with upload_sessions_lock:
+        event = estimation_tasks.get(session_id)
+        if event:
+            event.set()
+        state = read_estimate_state(session_dir)
+        if event:
+            state.update(status="canceling", message="正在停止试编码…")
+            write_estimate_state(session_dir, state)
+        return state
+
+
+@app.post("/api/uploads/{session_id}/estimate")
+async def start_size_estimate(
+    session_id: str,
+    fixed_watermark: Optional[UploadFile] = File(None),
+    dynamic_watermark: Optional[UploadFile] = File(None),
+    fixed_watermark_enabled: str = Form("true"),
+    dynamic_watermark_enabled: str = Form("true"),
+    fixed_watermark_pos: str = Form("top-right"),
+    interval: str = Form("60"), duration: str = Form("5"), crf: str = Form("32"),
+    format_type: str = Form("h264"), encoder_preset: str = Form("veryfast"),
+    fixed_watermark_size: str = Form("6.25"), dynamic_watermark_size: str = Form("6.25"),
+    encoder_device: str = Form(DEFAULT_ENCODER_DEVICE), gpu_quality: str = Form("26"),
+    gpu_preset: str = Form("p4"),
+) -> dict:
+    session_dir = upload_session_path(session_id)
+    settings = build_job_settings(
+        fixed_watermark_enabled, dynamic_watermark_enabled, fixed_watermark_pos,
+        interval, duration, crf, format_type, encoder_preset,
+        fixed_watermark_size, dynamic_watermark_size, encoder_device, gpu_quality, gpu_preset,
+    )
+    device, reason = select_encoder(encoder_device, settings["format_type"])
+    threads = GPU_CPU_THREADS if device == "nvidia" else recommend_ffmpeg_threads(0)
+    with job_control_lock:
+        if not encoding_work_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="服务器正在编码或预估，请完成后再试")
+        try:
+            with db_lock, db_connect() as conn:
+                busy = conn.execute("SELECT 1 FROM jobs WHERE status IN ('queued', 'running') LIMIT 1").fetchone()
+            if busy:
+                raise HTTPException(status_code=409, detail="请等待正在制作的任务完成后再预估")
+            with upload_sessions_lock:
+                if session_id in completing_upload_sessions:
+                    raise HTTPException(status_code=409, detail="该上传正在预估或创建任务，请稍后")
+                manifest = load_upload_manifest(session_dir)
+                for item in manifest["files"]:
+                    source = session_dir / "files" / item["path"]
+                    if (not is_safe_child(source, session_dir / "files")
+                            or len(item.get("received_chunks", [])) != item["chunk_count"]
+                            or not source.is_file() or source.stat().st_size != item["size"]):
+                        raise HTTPException(status_code=409, detail="仍有文件尚未上传完成")
+                completing_upload_sessions.add(session_id)
+        except BaseException:
+            encoding_work_lock.release()
+            raise
+    work_dir = session_dir / ("estimate-work-" + uuid.uuid4().hex)
+    handed_off = False
+    try:
+        work_dir.mkdir()
+        hashes = {}
+        for kind, upload, default in (("fixed", fixed_watermark, "rt.png"),
+                                       ("dynamic", dynamic_watermark, "dt.png")):
+            path = await save_upload_file(upload, work_dir) if upload and upload.filename else ROOT / default
+            settings[f"{kind}_watermark_path"] = str(path)
+            # Image content, rather than its temporary filename, identifies a trial.
+            with path.open("rb") as image:
+                hashes[kind] = hashlib.file_digest(image, "sha256").hexdigest()
+        cache_key = hashlib.sha256(json.dumps({
+            "schema": 1, "version": APP_VERSION,
+            "settings": {k: v for k, v in settings.items() if not k.endswith("_path")},
+            "watermarks": hashes, "device": device, "threads": threads,
+            "files": [{"path": f["path"], "size": f["size"]} for f in manifest["files"]],
+        }, sort_keys=True).encode()).hexdigest()
+        with upload_sessions_lock:
+            try:
+                cached = read_estimate_state(session_dir)
+            except HTTPException:
+                cached = {}
+            if (cached.get("status") == "done" and cached.get("cache_key") == cache_key
+                    and all(item.get("encoder_device") == device for item in cached.get("files", []))):
+                return cached
+            state = {"id": uuid.uuid4().hex, "status": "running", "progress": 0,
+                     "message": "正在准备试编码…", "files": [], "cache_key": cache_key,
+                     "encoder_device": device, "fallback_reason": reason}
+            canceled = threading.Event()
+            write_estimate_state(session_dir, state)
+            estimation_tasks[session_id] = canceled
+            # Return a separate object: the worker immediately mutates its state.
+            response = json.loads(json.dumps(state))
+        thread = threading.Thread(target=run_size_estimate, args=(session_id, session_dir,
+            manifest, settings, device, threads, work_dir, state, canceled), daemon=True,
+            name="video-size-estimate")
+        thread.start()
+        handed_off = True
+        return response
+    finally:
+        if not handed_off:
+            try:
+                delete_path_safely(work_dir, session_dir)
+            finally:
+                with upload_sessions_lock:
+                    estimation_tasks.pop(session_id, None)
+                    completing_upload_sessions.discard(session_id)
+                    encoding_work_lock.release()
+
+
 @app.post("/api/uploads/{session_id}/complete")
 async def complete_resumable_upload(
     session_id: str,
@@ -1880,7 +2091,7 @@ async def complete_resumable_upload(
     )
     with upload_sessions_lock:
         if session_id in completing_upload_sessions:
-            raise HTTPException(status_code=409, detail="该上传正在创建任务，请勿重复提交")
+            raise HTTPException(status_code=409, detail="该上传正在预估或创建任务，请稍后")
         manifest = load_upload_manifest(session_dir)
         incomplete = [
             item["path"]

@@ -297,7 +297,7 @@ def _bounded_int(value, default, min_value, max_value):
 
 
 def _dynamic_watermark_expressions(interval, hold_seconds, video_width, video_height,
-                                   watermark_w, watermark_h):
+                                   watermark_w, watermark_h, time_offset=0):
     """Return constant-size FFmpeg expressions for time-segmented watermark positions."""
     max_x = max(0, video_width - watermark_w)
     max_y = max(0, video_height - watermark_h)
@@ -305,10 +305,11 @@ def _dynamic_watermark_expressions(interval, hold_seconds, video_width, video_he
     margin_y = min(100, max_y // 4)
     range_x = max(0, max_x - margin_x * 2)
     range_y = max(0, max_y - margin_y * 2)
-    slot = f"floor(t/{interval})"
+    clock = f"(t+{time_offset:.6f})" if time_offset else "t"
+    slot = f"floor({clock}/{interval})"
     x_expr = f"{margin_x}+trunc({range_x}*abs(sin(({slot}+1)*12.9898)))"
     y_expr = f"{margin_y}+trunc({range_y}*abs(sin(({slot}+1)*78.233)))"
-    enable_expr = f"lt(mod(t,{interval}),{hold_seconds})"
+    enable_expr = f"lt(mod({clock},{interval}),{hold_seconds})"
     return x_expr, y_expr, enable_expr
 
 
@@ -321,7 +322,8 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
                             fixed_watermark_width_ratio=None, dynamic_watermark_width_ratio=None,
                             encoder_threads=None, filter_threads=1,
                             encoder_preset=None, encoder_device="cpu",
-                            gpu_quality=26, gpu_preset="p4"):
+                            gpu_quality=26, gpu_preset="p4",
+                            sample_start=None, sample_duration=None):
     """
     生成带有水印的FFmpeg命令。
 
@@ -373,7 +375,8 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
         output_path = base + fmt["ext"]
 
     filter_complex_parts = []
-    input_files = f'-i "{video_path}"'
+    seek_args = f'-ss {float(sample_start):.6f} ' if sample_start is not None else ''
+    input_files = f'{seek_args}-i "{video_path}"'
     current_label = "0:v"
     label_seq = 1
     next_input_index = 1
@@ -416,6 +419,7 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
 
         x_expr, y_expr, enable_expr = _dynamic_watermark_expressions(
             interval, watermark_duration_seconds, width, height, dt_w, dt_h,
+            time_offset=float(sample_start or 0),
         )
         next_label = f"v{label_seq}"
         label_seq += 1
@@ -455,6 +459,7 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
         f'{video_codec_args} '
         f'{encoder_thread_args}'
         f'-max_muxing_queue_size 1024 -c:a aac -b:a 128k '
+        f'{f"-t {float(sample_duration):.6f} " if sample_duration is not None else ""}'
         f'"{output_path}"'
     )
 

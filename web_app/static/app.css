@@ -13,6 +13,29 @@
   --workspace-width: min(75vw, 1500px, calc(100vw - 48px));
 }
 
+.size-estimate {
+  min-width: 0;
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--soft);
+}
+.estimate-actions { display: flex; gap: 10px; }
+.estimate-summary { margin: 12px 0; font-size: 16px; }
+.estimate-summary strong { color: var(--primary-dark); }
+.estimate-table-wrap { overflow-x: auto; }
+.estimate-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.estimate-table th, .estimate-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); }
+.estimate-table td:first-child { min-width: 140px; max-width: 360px; overflow-wrap: anywhere; }
+.estimate-table td:not(:first-child) { white-space: nowrap; }
+#sizeEstimateResult.stale { opacity: 0.5; }
+#jobForm.is-estimating #sizeEstimatePanel { pointer-events: auto; }
+#jobForm.is-estimating #lockBanner { border-color: var(--line); }
+@media (max-width: 640px) {
+  #sizeEstimatePanel > .row { align-items: flex-start; flex-direction: column; gap: 10px; }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -399,10 +422,12 @@ form {
 .process-params-panel {
   grid-area: params;
   align-self: start;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .process-params-panel .three {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .process-params-panel button[type="submit"] {
