@@ -1,0 +1,13 @@
+# Use together with compose.yaml, and compose.nvidia.yaml on NVIDIA hosts.
+services:
+  video-processor:
+    image: video-processor-web:${VIDEO_PROCESSOR_IMAGE_TAG:?Set VIDEO_PROCESSOR_IMAGE_TAG to the release Git revision}
+    environment:
+      VIDEO_PROCESSOR_AUTH_PASSWORD: ${VIDEO_PROCESSOR_AUTH_PASSWORD:?Set a production login password in .env}
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

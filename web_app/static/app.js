@@ -31,6 +31,10 @@ const fixedWatermarkSizeValue = document.querySelector("#fixedWatermarkSizeValue
 const dynamicWatermarkSizeValue = document.querySelector("#dynamicWatermarkSizeValue");
 const encoderPreset = document.querySelector("#encoderPreset");
 const encoderPresetHint = document.querySelector("#encoderPresetHint");
+const encoderDevice = document.querySelector("#encoderDevice");
+const gpuPreset = document.querySelector("#gpuPreset");
+const outputFormat = document.querySelector("#outputFormat");
+const encoderDeviceHint = document.querySelector("#encoderDeviceHint");
 const previewVideo = document.querySelector("#previewVideo");
 const previewWatermark = document.querySelector("#previewWatermark");
 const previewDynamicWatermark = document.querySelector("#previewDynamicWatermark");
@@ -108,6 +112,19 @@ let recordsFeedbackTimer = null;
 let recordErrorDetails = new Map();
 let recordsPageNumber = 1;
 let systemStatusRequestInFlight = false;
+let encodingConfig = null;
+const encodingFields = ["encoder_device", "format_type", "crf", "encoder_preset", "gpu_quality", "gpu_preset"];
+let savedEncodingSettings = {};
+try {
+  savedEncodingSettings = JSON.parse(localStorage.getItem("videoProcessorEncodingSettings") || "{}") || {};
+} catch { /* Invalid saved preferences use defaults. */ }
+for (const name of encodingFields) {
+  const control = form.elements.namedItem(name);
+  const saved = savedEncodingSettings[name];
+  if (saved !== undefined && control) {
+    if (control.tagName !== "SELECT" || [...control.options].some(option => option.value === saved)) control.value = saved;
+  }
+}
 
 const ENCODER_PRESET_HINTS = {
   ultrafast: "极速优先会尽可能加快编码，适合临时预览或特别赶时间的任务，文件体积通常会更大。",
@@ -163,7 +180,50 @@ function statusText(status) {
 
 function updateEncoderPresetHint() {
   if (!encoderPreset || !encoderPresetHint) return;
-  encoderPresetHint.textContent = ENCODER_PRESET_HINTS[encoderPreset.value] || ENCODER_PRESET_HINTS.veryfast;
+  const kind = outputFormat.value === "h265" ? "h265" : "h264";
+  const available = Boolean(encodingConfig?.gpu?.codecs?.[kind]?.available);
+  const usesGpu = encoderDevice.value === "nvidia" || (encoderDevice.value === "auto" && available);
+  // Hidden controls must not block native form validation. Their saved values
+  // remain intact and become editable again when their device is selected.
+  for (const id of ["gpuQualityField", "gpuPresetField", "cpuQualityField", "cpuPresetField"]) {
+    const field = document.getElementById(id);
+    field.hidden = id.startsWith("gpu") ? !usesGpu : usesGpu && encoderDevice.value !== "auto";
+    for (const control of field.querySelectorAll("input, select")) control.disabled = field.hidden;
+  }
+  const schedulingHint = document.querySelector("#gpuSchedulingHint");
+  schedulingHint.hidden = !usesGpu;
+  schedulingHint.textContent = `GPU 并发自动调节：目标 ${encodingConfig?.gpu_target_percent || 80}%，达到阈值后停止新增任务。`;
+  if (!encodingConfig) {
+    encoderDeviceHint.textContent = "正在检测服务器编码设备…";
+  } else if (usesGpu && available) {
+    encoderDeviceHint.textContent = `${encodingConfig.gpu.name} · GPU 编码，CPU 负责解码和水印。` +
+      (encoderDevice.value === "auto" ? "GPU 不可用时使用独立的 CPU 参数重新制作。" : "GPU 编码不可用时任务会报错。");
+  } else if (encoderDevice.value === "nvidia") {
+    encoderDeviceHint.textContent = "当前格式的 GPU 编码不可用，请选择自动或 CPU，或检查显卡驱动及 Docker GPU 配置。";
+  } else if (encoderDevice.value === "auto") {
+    encoderDeviceHint.textContent = "当前格式的 GPU 编码不可用，自动使用 CPU。服务器开启 GPU 透传后可使用硬件编码。";
+  } else {
+    encoderDeviceHint.textContent = "使用 CPU 编码；GPU 保持可供其他任务使用。";
+  }
+  encoderPresetHint.textContent = usesGpu
+    ? "GPU 质量 CQ 越小画质越高，文件通常越大；CQ 与 CPU 的 CRF 不可直接对比。均衡策略适合批量处理，画质优先策略会增加编码耗时。"
+    : ENCODER_PRESET_HINTS[encoderPreset.value] || ENCODER_PRESET_HINTS.veryfast;
+}
+
+function saveEncodingSettings() {
+  const values = {};
+  for (const name of encodingFields) values[name] = form.elements.namedItem(name).value;
+  try {
+    localStorage.setItem("videoProcessorEncodingSettings", JSON.stringify(values));
+  } catch { /* Encoding still works when browser storage is unavailable. */ }
+  savedEncodingSettings = values;
+}
+
+function encoderDescription(file) {
+  if (!file.encoder_name && file.status === "queued") return "等待分配编码设备";
+  const device = file.encoder_device === "nvidia" ? "GPU" : "CPU";
+  const name = file.encoder_name || (file.status === "queued" ? "待分配" : device);
+  return `${device} · ${name}${file.fallback_reason ? " · 已回退到 CPU" : ""}`;
 }
 
 function fmtSize(bytes) {
@@ -194,6 +254,12 @@ async function loadSystemStatus() {
       `磁盘可用 ${fmtSize(status.disk_free_bytes)} · ` +
       `读 ${fmtRate(status.disk_read_bytes_per_sec)} · 写 ${fmtRate(status.disk_write_bytes_per_sec)} · ` +
       `FFmpeg ${status.active_ffmpeg} 路`;
+    if (status.gpu) {
+      const gpu = status.gpu;
+      currentResourceMeta.textContent += ` · ${gpu.name}` +
+        (gpu.encoder_percent !== null ? ` · 编码器 ${gpu.encoder_percent}%` : "") +
+        (gpu.memory_used_mb !== null && gpu.memory_total_mb !== null ? ` · 显存 ${Math.round(gpu.memory_used_mb)}/${Math.round(gpu.memory_total_mb)} MB` : "");
+    }
   } catch {
     // Keep the last successful resource snapshot rather than flashing an error.
   } finally {
@@ -782,6 +848,9 @@ async function loadConfig() {
   try {
     const res = await fetch("/api/config");
     const cfg = await res.json();
+    encodingConfig = cfg;
+    if (!savedEncodingSettings.encoder_device) encoderDevice.value = cfg.encoder_device_default || "auto";
+    updateEncoderPresetHint();
     configText.textContent = `目录 ${cfg.root}，文件保留 ${cfg.file_retention_days} 天，记录保留 ${cfg.record_retention_days} 天`;
   } catch {
     configText.textContent = "配置读取失败，请确认服务正在运行";
@@ -874,7 +943,7 @@ async function loadJobs() {
           <div class="file record-tree-file" style="--tree-depth:${depth}">
             <div>
               <strong title="${escapeHtml(file.original_name)}">${escapeHtml(entry.name)}</strong>
-              <div class="meta">${escapeHtml(file.resolution)} · ${fmtSize(file.size_bytes)}</div>
+              <div class="meta" title="${escapeHtml(file.fallback_reason || "")}">${escapeHtml(file.resolution)} · ${fmtSize(file.size_bytes)} · ${escapeHtml(encoderDescription(file))}</div>
             </div>
             <span class="status-${displayStatus}">${statusText(displayStatus)}</span>
             <span>${displayProgress(file.progress, file.status === "done")}%</span>
@@ -899,7 +968,7 @@ async function loadJobs() {
             <div class="meta">任务 ${escapeHtml(job.id)} · ${statusText(job.status)} · ${escapeHtml(job.message || "")}</div>
           </div>
           <div class="job-actions">
-            <span class="meta">任务数 ${job.worker_count} · ${job.done_count}/${job.total_count}</span>
+            <span class="meta">当前并发 ${job.status === "running" ? job.worker_count : 0} · ${job.done_count}/${job.total_count}</span>
             ${canResume ? `<button class="resume-record" type="button" data-job-id="${job.id}">继续</button>` : ""}
             ${canDownloadAll ? `<button class="download-all" type="button" data-job-id="${job.id}">打包下载</button>` : `<button class="download-all" type="button" disabled title="任务完成后可打包下载">打包下载</button>`}
             <button class="delete-record" type="button" data-job-id="${job.id}" ${taskActive ? "disabled title=\"任务结束后可删除\"" : ""}>删除</button>
@@ -1036,7 +1105,7 @@ function renderCurrent(detail) {
   currentProgressText.textContent = `${progress}%`;
   currentProgressBar.style.width = `${progress}%`;
   document.querySelector(".progress-ring").style.setProperty("--progress", `${progress}%`);
-  currentJobMeta.textContent = `总任务：${job.total_count}　已处理：${job.done_count}/${job.total_count}　任务数：${job.worker_count}`;
+  currentJobMeta.textContent = `总视频：${job.total_count}　已处理：${job.done_count}/${job.total_count}　当前并发：${job.status === "running" ? job.worker_count : 0}`;
   const tree = buildFileTree(files, file => file.original_name);
   currentFiles.innerHTML = renderTreeNodes(tree, {
     scope: `current:${job.id}`,
@@ -1045,9 +1114,7 @@ function renderCurrent(detail) {
     folderMeta: stats => `${stats.done}/${stats.count} 已完成 · ${fmtSize(stats.totalSize)}`,
     renderFile: (entry, depth) => {
       const file = entry.item;
-      const runtime = file.status === "running"
-        ? `<small class="current-file-runtime">${fmtSpeed(file.speed)} · ${file.encoder_threads || "-"} 线程</small>`
-        : "";
+      const runtime = `<small class="current-file-runtime" title="${escapeHtml(file.fallback_reason || "")}">${escapeHtml(encoderDescription(file))}${file.status === "running" ? ` · ${fmtSpeed(file.speed)}` : ""}</small>`;
       return `
         <div class="current-file tree-current-file" style="--tree-depth:${depth}">
           <strong title="${escapeHtml(file.original_name)}">${escapeHtml(entry.name)}</strong>
@@ -1364,11 +1431,19 @@ form.addEventListener("submit", async (event) => {
     alert("请先选择视频文件");
     return;
   }
+  const kind = outputFormat.value === "h265" ? "h265" : "h264";
+  if (encoderDevice.value === "nvidia" && !encodingConfig?.gpu?.codecs?.[kind]?.available) {
+    showToast("当前格式的 GPU 编码不可用，请先选择自动或 CPU 编码。", "error");
+    return;
+  }
+  saveEncodingSettings();
   const submit = form.querySelector("button[type=submit]");
   submit.textContent = "正在上传...";
   setUploadProgress(0);
   try {
     const data = new FormData(form);
+    // Disabled, hidden device controls still belong to this job's saved settings.
+    for (const name of encodingFields) data.set(name, form.elements.namedItem(name).value);
     data.delete("videos");
     data.delete("video_paths");
     for (const file of selectedFiles) {
@@ -1399,6 +1474,15 @@ form.addEventListener("submit", async (event) => {
 
 refreshBtn.addEventListener("click", refreshRecords);
 encoderPreset.addEventListener("change", updateEncoderPresetHint);
+for (const name of encodingFields) {
+  const control = form.elements.namedItem(name);
+  const update = () => {
+    saveEncodingSettings();
+    updateEncoderPresetHint();
+  };
+  control.addEventListener("change", update);
+  if (control.tagName === "INPUT") control.addEventListener("input", update);
+}
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submit = loginForm.querySelector("button[type=submit]");

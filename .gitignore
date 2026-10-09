@@ -11,3 +11,11 @@ tmp/
 watermarks/
 video_processor.db
 *.zip
+.env
+.env.*
+!.env.example
+data/
+*.db-*
+# Local verification screenshots and dependency reports are recorded in Markdown.
+deploy/*.jpg
+deploy/dependency-audit-*.json

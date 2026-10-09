@@ -410,6 +410,7 @@ form {
 }
 
 .param-hint {
+  grid-column: 1 / -1;
   margin: -2px 0 2px;
   padding: 10px 12px;
   border: 1px solid #dbeafe;

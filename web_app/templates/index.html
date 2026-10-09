@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260629-login-focus">
+  <link rel="stylesheet" href="/static/app.css?v=20261009-gpu">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -41,7 +41,7 @@
       <header class="workspace-header">
         <div class="title-line">
           <h1>视频处理器</h1>
-          <p>内网批量水印与压缩处理，服务器 CPU 编码</p>
+          <p>内网批量水印与压缩处理，支持 CPU 与 NVIDIA GPU 编码</p>
         </div>
       </header>
 
@@ -190,8 +190,22 @@
         <section class="sub-panel process-params-panel">
           <h2>4. 处理参数</h2>
           <div class="grid three">
-            <label>质量值 CRF<input type="number" name="crf" min="20" max="51" value="32"></label>
-            <label>编码策略
+            <label>编码设备
+              <select id="encoderDevice" name="encoder_device">
+                <option value="auto" selected>自动选择：优先 GPU</option>
+                <option value="cpu">CPU 编码</option>
+                <option value="nvidia">NVIDIA GPU 编码</option>
+              </select>
+            </label>
+            <label>导出格式
+              <select id="outputFormat" name="format_type">
+                <option value="h264" selected>MP4 H.264</option>
+                <option value="h265">MP4 H.265</option>
+                <option value="mkv">MKV H.264</option>
+              </select>
+            </label>
+            <label id="cpuQualityField">CPU 质量 CRF<input type="number" name="crf" min="20" max="51" value="32"></label>
+            <label id="cpuPresetField">CPU 编码策略
               <select id="encoderPreset" name="encoder_preset">
                 <option value="ultrafast">极速优先：最快，文件较大</option>
                 <option value="veryfast" selected>速度优先：批量处理推荐</option>
@@ -200,13 +214,18 @@
                 <option value="slow">高压缩：最慢，体积更小</option>
               </select>
             </label>
-            <label>导出格式
-              <select name="format_type">
-                <option value="h264" selected>MP4 H.264</option>
-                <option value="h265">MP4 H.265</option>
-                <option value="mkv">MKV H.264</option>
+            <label id="gpuQualityField" hidden>GPU 质量 CQ<input type="number" name="gpu_quality" min="1" max="51" value="26"></label>
+            <label id="gpuPresetField" hidden>GPU 编码策略
+              <select id="gpuPreset" name="gpu_preset">
+                <option value="p1">极速优先</option>
+                <option value="p3">速度优先</option>
+                <option value="p4" selected>均衡：推荐</option>
+                <option value="p6">画质优先</option>
+                <option value="p7">高质量：更慢</option>
               </select>
             </label>
+            <p id="gpuSchedulingHint" class="param-hint" hidden>GPU 并发自动调节：目标 80%，达到阈值后停止新增任务。</p>
+            <p id="encoderDeviceHint" class="param-hint">正在检测服务器编码设备…</p>
             <p id="encoderPresetHint" class="param-hint">速度优先适合批量处理，编码速度更快，文件体积可能略大。</p>
             <button type="submit">开始制作</button>
           </div>
@@ -295,10 +314,6 @@
       </div>
     </div>
   </div>
-<<<<<<< HEAD
-  <script src="/static/app.js?v=20260629-login-focus"></script>
-=======
-  <script src="/static/app.js?v=20260627-2"></script>
->>>>>>> liuzhiheng
+  <script src="/static/app.js?v=20261009-gpu-auto-2"></script>
 </body>
 </html>

@@ -1,6 +1,156 @@
 # 视频处理器 Web 版
 
-内网 Web 版默认部署目录：111
+## Docker 部署（推荐）
+
+镜像内已包含 Python、FFmpeg/FFprobe 和 Web 依赖，支持 Docker Engine + Compose 插件，或启用 Linux 容器的 Docker Desktop。
+
+在项目根目录执行：
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+Windows PowerShell 中第一条命令改为 `Copy-Item .env.example .env`。
+浏览器访问 `http://localhost:8899`，其他设备访问 `http://服务器IP:8899`。
+无需在宿主机安装 Python 或 FFmpeg。
+
+### NVIDIA GPU 编码
+
+支持自动选择、CPU、NVIDIA GPU 三种模式。自动模式通过实际试编码检测 H.264/H.265 支持，
+优先使用 NVENC；设备不可用时使用 CPU。执行中遇到 GPU 专属错误时，自动模式会使用独立的 CPU 参数重新制作；
+明确选择 NVIDIA 模式则报告错误，避免悄悄切换设备。损坏视频、磁盘不足和水印错误不会触发 GPU 回退。
+
+在已安装 NVIDIA 驱动和 NVIDIA Container Toolkit 的服务器上执行：
+
+```bash
+docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build --wait
+```
+
+GPU 模式的启动、停止、更新命令均使用这两个 Compose 文件。
+普通 `docker compose up -d` 使用 CPU 部署配置，自动模式会选择 CPU。
+详细安装步骤及内网离线部署方法见 [Ubuntu + RTX 3090 部署说明](deploy/ubuntu-nvidia.md)。
+
+页面分别保存 CPU 的 CRF/编码策略和 GPU 的 CQ/编码策略。数值越小画质越高，文件通常越大，
+但 CRF 与 CQ 不能直接等同。GPU 默认 CQ 26、均衡策略 p4，并发根据资源自动调节；
+自动模式同时显示 CPU 参数，供失败后重新制作时使用。处理进度和记录显示实际编码器及回退情况。
+GPU 状态显示可用的编码器负载与显存指标。调度从 1 路开始，新任务启动 5 秒后再次采样，
+GPU 编码器占用、显存占用、GPU 利用率、CPU 或系统内存达到 80% 时停止新增任务，
+负载回落后继续增加；同时保留磁盘空间和 I/O 检查。监控缺失时保持单路处理。
+这是新增任务的判断阈值，不会中止已运行任务或强行把瞬时负载固定在 80%。
+
+`.env` 中可配置：
+
+```dotenv
+VIDEO_PROCESSOR_ENCODER_DEVICE=auto
+VIDEO_PROCESSOR_GPU_DEVICE_ID=0
+VIDEO_PROCESSOR_GPU_MAX_CONCURRENT=8
+VIDEO_PROCESSOR_GPU_CPU_THREADS=4
+```
+
+页面无需手选并发数。`VIDEO_PROCESSOR_GPU_MAX_CONCURRENT` 是安全上限，默认 8，与 CPU 的上限一致，
+实际并发由资源采样决定；旧页面保存的 1/2 路设置不会限制新的自动调度。
+已有 `.env` 若设置了 `VIDEO_PROCESSOR_GPU_MAX_CONCURRENT=2`，更新时将其改成 `8` 后重新创建容器。
+GeForce 的 NVENC 会话数量也受显卡驱动和其他应用影响，见 [NVIDIA 官方 NVENC 说明](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvenc-application-note/index.html)。
+单个选定 GPU 负责编码，CPU 负责解码、水印和音频；CPU 线程数只控制 GPU 任务的 CPU 工作部分。
+本版本保留单个应用进程，旧任务没有设备选项时继续使用 CPU。
+
+空闲时可运行 HTTP 全流程验证（只清理脚本自己创建的任务）：
+
+```bash
+python3 deploy/validate_docker.py --gpu
+```
+
+修改 `.env` 可调整端口、保留时间、上传限制、登录密码和企业微信通知。
+例如设置 `VIDEO_PROCESSOR_PORT=9000` 后，通过 `http://服务器IP:9000` 访问。
+如需登录保护，设置 `VIDEO_PROCESSOR_AUTH_PASSWORD`；密码和 Webhook 不要提交到 Git。
+仅本机访问时可设置 `VIDEO_PROCESSOR_BIND_IP=127.0.0.1`。
+修改配置后执行 `docker compose up -d`。
+
+### 正式环境发布
+
+Ubuntu + RTX 3090 的正式发布使用三个配置文件：`compose.yaml`、`compose.nvidia.yaml`、
+`compose.production.yaml`。生产配置要求非空登录密码和镜像版本标签，并启用只读根文件系统；
+数据库和视频仍写入原来的数据卷。
+版本标识、发布前备份、离线镜像交付、验证和回滚命令见 [正式环境发布步骤](deploy/production-release.md)。
+`/health` 返回应用版本和构建 Git 提交号，用于确认运行中的版本。
+
+```bash
+docker compose ps                 # 查看运行状态与健康检查
+docker compose logs -f --tail=100  # 查看日志，Ctrl+C 退出
+docker compose down               # 停止并删除容器，保留数据
+docker compose up -d --build       # 更新源码后重建并启动
+```
+
+数据默认保存在 Compose 创建的 `video-data` 命名卷中（实际名称带项目名前缀），
+容器内目录为 `/data/video-processor`，包含数据库、上传视频、成品、水印和临时文件。
+重新构建镜像或执行 `docker compose down` 不会删除这些数据。
+**`docker compose down -v` 会删除数据卷，不能作为普通更新命令。**
+备份数据库和视频时先执行 `docker compose stop`，再备份整个数据卷；备份后执行 `docker compose start`。
+
+如需直接保存到宿主机目录，把 `compose.yaml` 中服务的卷映射改为：
+
+```yaml
+    volumes:
+      - ./data:/data/video-processor
+```
+
+Linux 上先执行 `mkdir -p data && sudo chown 1000:1000 data`。
+容器以 UID/GID `1000:1000` 运行，挂载目录必须允许该用户写入。
+Windows Docker Desktop 使用命名卷即可，无需执行 Linux 权限命令。
+
+原部署的数据如需迁移，先停止旧服务并完整备份。数据库中保存了文件的绝对路径，
+不能只把数据库复制到新的目录。保持原来的容器内数据路径，例如旧目录为
+`/data/video-processor-data` 时，同时把服务中的 `VIDEO_PROCESSOR_ROOT` 改为该路径、
+把卷映射改为 `/data/video-processor-data:/data/video-processor-data`，并确认目录权限。
+旧任务如使用项目自带水印，数据库中还可能引用原源码目录的 `rt.png`、`dt.png`；
+应保留这两个原路径（通过只读挂载对应文件），或在迁移前完成旧任务。
+
+注意：
+
+- 保持单个容器、`--workers 1`；当前任务队列在进程内，不能直接扩容多个副本。
+- 默认预留 20 GB 磁盘空间；Docker Desktop 应检查 Docker 虚拟磁盘的剩余空间。
+  测试环境空间较小时可调整 `.env` 中的 `VIDEO_PROCESSOR_MIN_FREE_GB`。
+- 默认 Compose 无需 GPU；GPU 部署增加 `compose.nvidia.yaml`。正在制作时建议先暂停任务，再更新或重启容器。
+- 镜像通过 `/health` 检查服务状态；`unhealthy` 可通过日志排查，重启策略仅在容器退出时触发。
+
+如果构建提示无法连接 `auth.docker.io` 或 `registry-1.docker.io`，先检查网络及 Docker Desktop 的代理设置。
+Windows 上即使已配置系统代理，Docker CLI 仍可能需要在当前 PowerShell 中指定代理后重试：
+
+```powershell
+# 替换为本机实际运行的 HTTP 代理地址；仅影响当前终端。
+$env:HTTP_PROXY = 'http://127.0.0.1:10808'
+$env:HTTPS_PROXY = $env:HTTP_PROXY
+docker compose up -d --build
+```
+
+代理地址属于部署环境配置，无需写入 Dockerfile 或提交到 Git。
+
+### 验证与回归测试
+
+Docker 实测结果见 [deploy/docker-validation.md](deploy/docker-validation.md)。
+H.265 编码已使用 x265 工作线程池参数设置线程预算，帧并行数交给编码器自动选择，
+避免将 64 个工作线程误传为超出限制的帧线程数。
+参数定义见 [x265 文档](https://x265.readthedocs.io/en/master/cli.html#performance-options)。
+
+启动容器后，可在 PowerShell 中运行实际 FFmpeg 编码回归测试：
+
+```powershell
+Get-Content -Raw tests/test_ffmpeg_integration.py | docker compose exec -T video-processor python -
+```
+
+已在宿主机安装 Python 和 FFmpeg 时，先执行 `python -m pip install -r requirements-dev.txt`，
+再执行 `python -m unittest discover -s tests`。也可使用隔离的镜像测试阶段：
+
+```bash
+docker build --target test -t video-processor-web:test .
+docker run --rm video-processor-web:test
+```
+
+GitHub Actions 自动运行回归测试、依赖漏洞审计、生产配置检查、镜像构建和 CPU HTTP 全流程验证。
+测试使用临时生成的视频，覆盖 H.265 自动线程数及 1、16、64 个工作线程预算。
+
+内网 Web 版默认部署目录：
 
 ```bash
 /data/video-processor-web
@@ -83,7 +233,7 @@ export VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
 
 ## 编码性能
 
-服务端固定使用 CPU 编码。处理页面可以选择编码策略：
+服务端支持 CPU 和 NVIDIA GPU 编码。CPU 编码策略如下：
 
 - 极速优先：最快，文件通常更大。
 - 速度优先：批量处理推荐，速度更快，文件可能略大。
@@ -112,7 +262,9 @@ export VIDEO_PROCESSOR_PUBLIC_URL='http://服务器IP:8899'
 
 `VIDEO_PROCESSOR_PUBLIC_URL` 为可选项；设置后，完成通知会附带打开处理记录页面的链接。
 如果提示 webhook 缺少完整 key，请检查面板里的环境变量是否保存成了完整的 `...send?key=xxxx`。
-如果提示 `CERTIFICATE_VERIFY_FAILED`，程序会自动使用企业微信专用 TLS 兼容模式重试；仍建议在项目环境中重新执行 `pip install -r requirements-web.txt`，并确认 Ubuntu 已安装 `ca-certificates`。
+如果提示 `CERTIFICATE_VERIFY_FAILED`，更新项目依赖并确认 Ubuntu 已安装 `ca-certificates`。
+内网使用自签 CA 时可通过 `SSL_CERT_FILE` 指定包含所需证书的 PEM 文件，并将文件只读挂载进容器。
+程序始终校验 TLS 证书，校验失败会报告通知失败。
 
 ### 可选访问保护
 
