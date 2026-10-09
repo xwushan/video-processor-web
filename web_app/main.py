@@ -82,7 +82,7 @@ AUTH_USER = os.getenv("VIDEO_PROCESSOR_AUTH_USER", "admin").strip() or "admin"
 AUTH_PASSWORD = os.getenv("VIDEO_PROCESSOR_AUTH_PASSWORD", "")
 AUTH_COOKIE_NAME = "video_processor_session"
 AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_REVISION = os.getenv("VIDEO_PROCESSOR_REVISION", "unknown")
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -1886,6 +1886,7 @@ def write_estimate_state(session_dir: Path, state: dict) -> None:
 def run_size_estimate(session_id, session_dir, manifest, settings, device, threads,
                       work_dir, state, canceled):
     terminal = "done"
+    preview_root = session_dir / "estimate-previews" / state["id"]
     try:
         for index, item in enumerate(manifest["files"]):
             if canceled.is_set():
@@ -1899,23 +1900,29 @@ def run_size_estimate(session_id, session_dir, manifest, settings, device, threa
                 with upload_sessions_lock:
                     write_estimate_state(session_dir, state)
             result = {"path": item["path"], "original_bytes": item["size"]}
+            file_work = work_dir / f"file-{index}"
             try:
                 ensure_disk_headroom()
+                file_work.mkdir()
                 try:
-                    result.update(estimate_file(source, work_dir, settings, device, threads,
-                                                canceled, terminate_process, on_sample))
+                    result.update(estimate_file(source, file_work, settings, device, threads,
+                                                canceled, terminate_process, on_sample, True))
                 except RuntimeError as exc:
                     if settings["encoder_device"] != "auto" or device != "nvidia" or not is_gpu_error(str(exc)):
                         raise
-                    result.update(estimate_file(source, work_dir, settings, "cpu", recommend_ffmpeg_threads(0),
-                                                canceled, terminate_process, on_sample))
+                    delete_path_safely(file_work, work_dir)
+                    file_work.mkdir()
+                    result.update(estimate_file(source, file_work, settings, "cpu", recommend_ffmpeg_threads(0),
+                                                canceled, terminate_process, on_sample, True))
                     result["fallback_reason"] = "GPU 试编码失败，已按 CPU 参数预估"
+                preview_root.mkdir(parents=True, exist_ok=True)
+                file_work.replace(preview_root / f"file-{index}")
             except EstimateCanceled:
                 raise
             except Exception as exc:
                 result["error"] = str(exc)[-400:] or "预估失败"
             state["files"].append(result)
-        good = [item for item in state["files"] if "estimated_bytes" in item]
+        good = [item for item in state["files"] if "estimated_bytes" in item and not item.get("error")]
         state["failed_count"] = len(state["files"]) - len(good)
         if state["failed_count"]:
             terminal = "error"
@@ -1928,6 +1935,9 @@ def run_size_estimate(session_id, session_dir, manifest, settings, device, threa
     except EstimateCanceled:
         terminal = "canceled"
         state["message"] = "已取消预估，已上传的视频可继续用于制作"
+        delete_path_safely(preview_root, session_dir)
+        for item in state["files"]:
+            item["samples"] = []
     except Exception as exc:
         terminal = "error"
         state["message"] = f"预估失败：{str(exc)[-250:]}"
@@ -1965,6 +1975,34 @@ def cancel_size_estimate(session_id: str) -> dict:
             state.update(status="canceling", message="正在停止试编码…")
             write_estimate_state(session_dir, state)
         return state
+
+
+def estimate_previews_exist(session_dir, state):
+    root = session_dir / "estimate-previews" / state.get("id", "")
+    return bool(state.get("files")) and all(
+        item.get("samples") and all((root / f"file-{index}" / f"{kind}-{sample}.{ext}").is_file()
+            for sample in range(len(item["samples"])) for kind, ext in (("preview", "mp4"), ("thumbnail", "jpg")))
+        for index, item in enumerate(state["files"]))
+
+
+@app.get("/api/uploads/{session_id}/estimate/{estimate_id}/files/{file_index}/samples/{sample_index}/{kind}")
+def size_estimate_preview(session_id: str, estimate_id: str, file_index: int, sample_index: int, kind: str):
+    session_dir = upload_session_path(session_id)
+    with upload_sessions_lock:
+        state = read_estimate_state(session_dir)
+        files = state.get("files", [])
+        if (not re.fullmatch(r"[0-9a-f]{32}", estimate_id) or state.get("id") != estimate_id
+                or state.get("status") not in {"done", "error"}
+                or not 0 <= file_index < len(files)
+                or not 0 <= sample_index < len(files[file_index].get("samples", []))
+                or kind not in {"video", "thumbnail"}):
+            raise HTTPException(status_code=404, detail="样片已失效，请重新预估")
+        filename = f"preview-{sample_index}.mp4" if kind == "video" else f"thumbnail-{sample_index}.jpg"
+        path = session_dir / "estimate-previews" / estimate_id / f"file-{file_index}" / filename
+        if not is_safe_child(path, session_dir) or not path.is_file():
+            raise HTTPException(status_code=404, detail="样片已清理，请重新预估")
+    return FileResponse(path, media_type="video/mp4" if kind == "video" else "image/jpeg",
+                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/api/uploads/{session_id}/estimate")
@@ -2024,7 +2062,7 @@ async def start_size_estimate(
             with path.open("rb") as image:
                 hashes[kind] = hashlib.file_digest(image, "sha256").hexdigest()
         cache_key = hashlib.sha256(json.dumps({
-            "schema": 1, "version": APP_VERSION,
+            "schema": 2, "version": APP_VERSION,
             "settings": {k: v for k, v in settings.items() if not k.endswith("_path")},
             "watermarks": hashes, "device": device, "threads": threads,
             "files": [{"path": f["path"], "size": f["size"]} for f in manifest["files"]],
@@ -2035,7 +2073,8 @@ async def start_size_estimate(
             except HTTPException:
                 cached = {}
             if (cached.get("status") == "done" and cached.get("cache_key") == cache_key
-                    and all(item.get("encoder_device") == device for item in cached.get("files", []))):
+                    and all(item.get("encoder_device") == device for item in cached.get("files", []))
+                    and estimate_previews_exist(session_dir, cached)):
                 return cached
             state = {"id": uuid.uuid4().hex, "status": "running", "progress": 0,
                      "message": "正在准备试编码…", "files": [], "cache_key": cache_key,
@@ -2045,6 +2084,8 @@ async def start_size_estimate(
             estimation_tasks[session_id] = canceled
             # Return a separate object: the worker immediately mutates its state.
             response = json.loads(json.dumps(state))
+        # A new snapshot invalidates old samples; uploaded sources remain reusable.
+        delete_path_safely(session_dir / "estimate-previews", session_dir)
         thread = threading.Thread(target=run_size_estimate, args=(session_id, session_dir,
             manifest, settings, device, threads, work_dir, state, canceled), daemon=True,
             name="video-size-estimate")

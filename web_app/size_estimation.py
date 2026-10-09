@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 
-from processVideo import _hidden_subprocess_kwargs, _probe_video, generate_ffmpeg_command
+from processVideo import _hidden_subprocess_kwargs, _probe_video, _tool_path, generate_ffmpeg_command
 
 
 SAMPLE_SECONDS = 8.0
@@ -72,13 +72,29 @@ def run_sample(command, canceled, terminate):
                 terminate(proc)
 
 
+def prepare_preview(output, index, duration, canceled, terminate):
+    """Keep the encoded bitstream intact while making a seekable browser sample."""
+    preview = output.parent / f"preview-{index}.mp4"
+    thumbnail = output.parent / f"thumbnail-{index}.jpg"
+    args = [_tool_path("ffmpeg"), "-nostdin", "-y", "-progress", "pipe:2", "-i", str(output),
+            "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart"]
+    video = next(s for s in _probe_video(str(output))["streams"] if s["codec_type"] == "video")
+    if video.get("codec_name") == "hevc":
+        args += ["-tag:v", "hvc1"]
+    run_sample(shlex.join(args + [str(preview)]), canceled, terminate)
+    run_sample(shlex.join([_tool_path("ffmpeg"), "-nostdin", "-y", "-progress", "pipe:2",
+        "-ss", str(min(1, duration / 2)), "-i", str(preview), "-frames:v", "1",
+        "-vf", "scale=320:-2", "-q:v", "3", "-update", "1", str(thumbnail)]), canceled, terminate)
+
+
 def estimate_file(source, work_dir, settings, encoder_device, encoder_threads,
-                  canceled, terminate, on_sample):
+                  canceled, terminate, on_sample, retain_previews=False):
     if canceled.is_set():
         raise EstimateCanceled()
     duration = media_duration(_probe_video(str(source)))
     plan = sample_plan(duration)
     rates = []
+    samples = []
     full_size = None
     for index, (start, length) in enumerate(plan):
         if canceled.is_set():
@@ -114,6 +130,9 @@ def estimate_file(source, work_dir, settings, encoder_device, encoder_threads,
             rates.append(size / encoded_duration)
             if length is None:
                 full_size = size
+            if retain_previews:
+                prepare_preview(output, index, encoded_duration, canceled, terminate)
+                samples.append({"start_sec": start or 0, "duration_sec": encoded_duration})
         finally:
             output.unlink(missing_ok=True)
     expected = full_size if full_size is not None else sum(rates) / len(rates) * duration
@@ -128,4 +147,5 @@ def estimate_file(source, work_dir, settings, encoder_device, encoder_threads,
         "estimated_bytes": round(expected), "min_bytes": max(1, round(low)), "max_bytes": round(high),
         "duration_sec": duration, "sample_count": len(plan), "full_trial": full_size is not None,
         "encoder_device": encoder_device, "encoder_name": encoder,
+        "samples": samples,
     }

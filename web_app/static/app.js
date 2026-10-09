@@ -66,6 +66,9 @@ const videoPreviewDialog = document.querySelector("#videoPreviewDialog");
 const videoPreviewTitle = document.querySelector("#videoPreviewTitle");
 const videoPreviewPlayer = document.querySelector("#videoPreviewPlayer");
 const closeVideoPreviewBtn = document.querySelector("#closeVideoPreviewBtn");
+const videoPreviewSampleControls = document.querySelector("#videoPreviewSampleControls");
+const videoPreviewSampleMeta = document.querySelector("#videoPreviewSampleMeta");
+const videoPreviewSampleDownload = document.querySelector("#videoPreviewSampleDownload");
 const errorDialog = document.querySelector("#errorDialog");
 const errorDialogMessage = document.querySelector("#errorDialogMessage");
 const closeErrorDialogBtn = document.querySelector("#closeErrorDialogBtn");
@@ -114,6 +117,8 @@ let estimateSignature = null;
 let estimateUploadController = null;
 let estimateSessionId = null;
 let estimateCancelRequested = false;
+let estimatePreviewState = null;
+let activeEstimatePreview = null;
 let uploadSessionMemory = null;
 let completedUploadFingerprint = null;
 let recordsSignature = "";
@@ -359,6 +364,7 @@ function openVideoPreview(index) {
   const file = selectedFiles[index];
   const url = selectedVideoUrls[index];
   if (!file || !url) return;
+  resetSamplePreview();
   videoPreviewTitle.textContent = file.name;
   videoPreviewPlayer.src = url;
   videoPreviewDialog.hidden = false;
@@ -370,7 +376,53 @@ function closeVideoPreview() {
   videoPreviewPlayer.removeAttribute("src");
   videoPreviewPlayer.load();
   videoPreviewDialog.hidden = true;
+  resetSamplePreview();
 }
+
+function resetSamplePreview() {
+  activeEstimatePreview = null;
+  videoPreviewDialog.classList.remove("is-sample-preview");
+  videoPreviewSampleControls.hidden = true;
+  videoPreviewSampleControls.replaceChildren();
+  videoPreviewSampleMeta.hidden = true;
+  videoPreviewSampleDownload.hidden = true;
+  videoPreviewSampleDownload.removeAttribute("href");
+  videoPreviewPlayer.removeAttribute("poster");
+}
+
+function sampleUrl(fileIndex, sampleIndex, kind) {
+  const { sessionId, state } = estimatePreviewState;
+  return `/api/uploads/${sessionId}/estimate/${state.id}/files/${fileIndex}/samples/${sampleIndex}/${kind}`;
+}
+
+function openEstimatePreview(fileIndex, sampleIndex = 0) {
+  if (!estimatePreviewState || sizeEstimateResult.classList.contains("stale")) return;
+  const file = estimatePreviewState.state.files[fileIndex];
+  const sample = file?.samples?.[sampleIndex];
+  if (!sample) return;
+  activeEstimatePreview = { fileIndex, sampleIndex };
+  videoPreviewDialog.classList.add("is-sample-preview");
+  videoPreviewTitle.textContent = `${file.path} · 处理后样片`;
+  videoPreviewSampleControls.innerHTML = file.samples.map((item, index) =>
+    `<button type="button" class="ghost" data-sample-index="${index}" aria-pressed="${index === sampleIndex}">${file.full_trial ? "完整样片" : `片段 ${index + 1} · ${fmtDuration(item.start_sec)}`}</button>`).join("");
+  videoPreviewSampleControls.hidden = false;
+  videoPreviewSampleMeta.textContent = `${file.encoder_name} · 原视频 ${fmtDuration(sample.start_sec)} 起 · 样片 ${fmtDuration(sample.duration_sec)}。使用本次预估参数，保留实际编码画质和分辨率，可全屏查看。`;
+  videoPreviewSampleMeta.hidden = false;
+  videoPreviewSampleDownload.href = sampleUrl(fileIndex, sampleIndex, "video");
+  videoPreviewSampleDownload.hidden = false;
+  videoPreviewPlayer.poster = sampleUrl(fileIndex, sampleIndex, "thumbnail");
+  videoPreviewPlayer.src = sampleUrl(fileIndex, sampleIndex, "video");
+  videoPreviewDialog.hidden = false;
+  videoPreviewPlayer.play().catch(() => {});
+}
+
+videoPreviewSampleControls.addEventListener("click", event => {
+  const button = event.target.closest("[data-sample-index]");
+  if (button && activeEstimatePreview) openEstimatePreview(activeEstimatePreview.fileIndex, Number(button.dataset.sampleIndex));
+});
+videoPreviewPlayer.addEventListener("error", () => {
+  if (activeEstimatePreview) videoPreviewSampleMeta.textContent = "浏览器无法播放此样片（部分浏览器不支持 H.265），或样片已失效。可下载用本地播放器查看，或重新预估。";
+});
 
 function showPage(name) {
   const records = name === "records";
@@ -1295,6 +1347,12 @@ async function createJobWithProgress(data) {
   data.delete("video_paths");
   const response = await fetch(`/api/uploads/${sessionId}/complete`, { method: "POST", body: data });
   const created = await readJsonResponse(response, "上传完成后创建任务失败");
+  if (activeEstimatePreview) closeVideoPreview();
+  estimatePreviewState = null;
+  estimateSignature = null;
+  sizeEstimateResult.classList.add("stale");
+  sizeEstimateResult.querySelectorAll(".estimate-preview-button").forEach(button => { button.disabled = true; });
+  sizeEstimateHint.textContent = "已开始制作，试编码样片已清理。可在下次制作前重新预估。";
   uploadSessionMemory = null;
   try { localStorage.removeItem(uploadSessionStorageKey); } catch { /* Storage is optional. */ }
   return created;
@@ -1324,12 +1382,16 @@ function invalidateSizeEstimate() {
   if (estimateBusy || !estimateSignature) return;
   const stale = estimateSignature !== sizeEstimateSignature();
   sizeEstimateResult.classList.toggle("stale", stale);
+  sizeEstimateResult.querySelectorAll(".estimate-preview-button").forEach(button => { button.disabled = stale; });
+  if (stale && activeEstimatePreview) closeVideoPreview();
   sizeEstimateHint.textContent = stale
     ? "视频或参数已修改，上次结果仅供对照，请重新预估。"
-    : "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
+    : estimatePreviewState?.state.status === "error" ? estimatePreviewState.state.message
+      : "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
 }
 
-function renderSizeEstimate(state) {
+function renderSizeEstimate(state, sessionId) {
+  estimatePreviewState = { state, sessionId };
   sizeEstimateHint.textContent = state.message || "正在预估…";
   const files = state.files || [];
   if (!files.length) return;
@@ -1339,13 +1401,18 @@ function renderSizeEstimate(state) {
     ? `<p class="estimate-summary">整批预计 <strong>${fmtSize(total.estimated_bytes)}</strong> · 参考范围 ${fmtSize(total.min_bytes)} ～ ${fmtSize(total.max_bytes)}<br><span class="meta">原始 ${fmtSize(total.original_bytes)} · 预计${ratio >= 0 ? "减少" : "增大"} ${Math.abs(ratio).toFixed(1)}%</span></p>`
     : "";
   sizeEstimateResult.innerHTML = summary + `<div class="estimate-table-wrap" tabindex="0" aria-label="视频体积预估结果，可横向滚动"><table class="estimate-table">
-    <thead><tr><th>视频</th><th>原始大小</th><th>预计大小</th><th>参考范围</th><th>实际试编码器</th></tr></thead>
-    <tbody>${files.map(file => `<tr><td>${escapeHtml(file.path)}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
-      ? `<td colspan="3">${escapeHtml(file.error)}</td>`
-      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${escapeHtml(file.encoder_name)}${file.full_trial ? " · 完整试编码" : " · 3 段抽样"}${file.fallback_reason ? " · 已回退 CPU" : ""}</td>`}</tr>`).join("")}
+    <thead><tr><th scope="col">视频名</th><th scope="col">视频时长</th><th scope="col">原始大小</th><th scope="col">预计大小</th><th scope="col">参考范围</th><th scope="col">实际试编码器</th><th scope="col">视频缩略图</th></tr></thead>
+    <tbody>${files.map((file, index) => `<tr><td>${escapeHtml(file.path)}</td><td>${Number.isFinite(file.duration_sec) ? fmtDuration(file.duration_sec) : "—"}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
+      ? `<td colspan="4">${escapeHtml(file.error)}</td>`
+      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${escapeHtml(file.encoder_name)}<br><span class="meta">${file.full_trial ? "完整试编码" : `${file.sample_count} 段抽样`}${file.fallback_reason ? " · 已回退 CPU" : ""}</span></td><td>${file.samples?.length ? `<button type="button" class="estimate-preview-button" data-estimate-preview="${index}" aria-label="查看 ${escapeHtml(file.path)} 的处理后样片"><img src="${sampleUrl(index, 0, "thumbnail")}" alt="处理后的视频缩略图" loading="lazy"><span>▶ 查看处理后画质</span></button>` : "暂无样片"}</td>`}</tr>`).join("")}
     </tbody></table></div>`;
   sizeEstimateResult.hidden = false;
 }
+
+sizeEstimateResult.addEventListener("click", event => {
+  const button = event.target.closest("[data-estimate-preview]");
+  if (button && !button.disabled) openEstimatePreview(Number(button.dataset.estimatePreview));
+});
 
 estimateSizeBtn.addEventListener("click", async () => {
   if (controlsLocked || !selectedFiles.length) return;
@@ -1353,6 +1420,7 @@ estimateSizeBtn.addEventListener("click", async () => {
   if (!form.reportValidity()) return;
   const signature = sizeEstimateSignature();
   const data = processingFormData();
+  if (activeEstimatePreview) closeVideoPreview();
   estimateBusy = true;
   estimateCancelRequested = false;
   estimateSessionId = null;
@@ -1379,8 +1447,8 @@ estimateSizeBtn.addEventListener("click", async () => {
       state = await readJsonResponse(await fetch(`/api/uploads/${estimateSessionId}/estimate`), "读取预估进度失败");
     }
     terminal = true;
-    renderSizeEstimate(state);
-    estimateSignature = state.status === "done" ? signature : null;
+    renderSizeEstimate(state, estimateSessionId);
+    estimateSignature = (state.files || []).some(file => file.samples?.length) ? signature : null;
     if (state.status === "done") sizeEstimateHint.textContent = "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
   } catch (error) {
     sizeEstimateHint.textContent = estimateCancelRequested
@@ -1730,6 +1798,7 @@ jobsEl.addEventListener("click", async (event) => {
 
   const playButton = event.target.closest(".play-video");
   if (playButton) {
+    resetSamplePreview();
     const jobId = playButton.dataset.jobId;
     const fileId = playButton.dataset.fileId;
     const name = playButton.dataset.name;

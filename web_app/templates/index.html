@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20261009-size-estimate">
+  <link rel="stylesheet" href="/static/app.css?v=20261009-sample-preview">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -229,17 +229,17 @@
             <p id="encoderPresetHint" class="param-hint">速度优先适合批量处理，编码速度更快，文件体积可能略大。</p>
             <button type="submit">开始制作</button>
           </div>
-          <div id="sizeEstimatePanel" class="size-estimate">
+        </section>
+        <section id="sizeEstimatePanel" class="sub-panel size-estimate">
             <div class="row between">
-              <strong>预计成品大小</strong>
+              <h2>5. 预计成品大小</h2>
               <div class="estimate-actions">
                 <button id="estimateSizeBtn" type="button" class="ghost" disabled>预估成品大小</button>
                 <button id="cancelEstimateBtn" type="button" class="text" hidden>取消预估</button>
               </div>
             </div>
-            <p id="sizeEstimateHint" class="meta" role="status">根据当前编码和水印参数抽样试编码。需先上传视频，开始制作时可复用上传；结果为参考范围。</p>
+            <p id="sizeEstimateHint" class="meta" role="status">根据当前编码和水印参数抽样试编码，点击结果中的缩略图查看处理后的画质。需先上传视频，开始制作时可复用上传；大小为参考值。</p>
             <div id="sizeEstimateResult" hidden></div>
-          </div>
           <div id="uploadProgress" class="upload-progress" hidden>
             <span>上传进度</span>
             <div class="bar"><i></i></div>
@@ -301,7 +301,10 @@
         <strong id="videoPreviewTitle">视频预览</strong>
         <button id="closeVideoPreviewBtn" type="button" class="icon-button" aria-label="关闭预览"></button>
       </div>
+      <div id="videoPreviewSampleControls" class="sample-controls" hidden></div>
+      <p id="videoPreviewSampleMeta" class="meta" role="status" hidden></p>
       <video id="videoPreviewPlayer" controls playsinline></video>
+      <a id="videoPreviewSampleDownload" class="archive-fallback" hidden download>下载当前样片</a>
     </div>
   </div>
   <div id="errorDialog" class="modal-backdrop" hidden>
@@ -325,6 +328,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=20261009-size-estimate"></script>
+  <script src="/static/app.js?v=20261009-sample-preview"></script>
 </body>
 </html>

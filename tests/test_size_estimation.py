@@ -37,8 +37,11 @@ class EstimationApiTest(TemporaryAppTestCase):
 
     def trial(self, source, work_dir, settings, device, *_args):
         self.assertEqual(source.read_bytes(), b"source")
+        (work_dir / "preview-0.mp4").write_bytes(b"processed-video")
+        (work_dir / "thumbnail-0.jpg").write_bytes(b"processed-thumbnail")
         return {"estimated_bytes": settings["crf"] * 100, "min_bytes": 2000, "max_bytes": 5000,
-                "encoder_device": device, "encoder_name": "libx264", "full_trial": False}
+                "encoder_device": device, "encoder_name": "libx264", "full_trial": False,
+                "duration_sec": 60, "sample_count": 1, "samples": [{"start_sec": 5, "duration_sec": 8}]}
 
     def test_cached_trial_parameter_change_and_reuse_for_actual_job(self):
         async def scenario():
@@ -51,6 +54,8 @@ class EstimationApiTest(TemporaryAppTestCase):
                     state = await self.finish(client, session)
                     self.assertEqual(state["status"], "done")
                     self.assertEqual(state["totals"]["estimated_bytes"], int(crf) * 100)
+                    url = f"/api/uploads/{session}/estimate/{state['id']}/files/0/samples/0/video"
+                    self.assertEqual((await client.get(url)).content, b"processed-video")
                 self.assertIsNone(main.current_job()["job"])
                 self.assertEqual(list((main.RESUMABLE_UPLOAD_DIR / session).glob("estimate-work-*")), [])
                 response = await client.post(f"/api/uploads/{session}/complete", data=form)
@@ -58,9 +63,62 @@ class EstimationApiTest(TemporaryAppTestCase):
                 files = main.get_job_files(response.json()["id"])
                 self.assertEqual(Path(files[0]["input_path"]).read_bytes(), b"source")
                 self.assertFalse((main.RESUMABLE_UPLOAD_DIR / session).exists())
+                self.assertEqual((await client.get(url)).status_code, 404)
         with patch.object(main, "estimate_file", side_effect=self.trial) as trial:
             asyncio.run(scenario())
         self.assertEqual(trial.call_count, 2)
+
+    def test_preview_range_snapshot_validation_and_missing_sample_cache(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                form = {"encoder_device": "cpu"}
+                await client.post(f"/api/uploads/{session}/estimate", data=form)
+                state = await self.finish(client, session)
+                base = f"/api/uploads/{session}/estimate/{state['id']}/files/0/samples/0"
+                response = await client.get(base + "/video", headers={"Range": "bytes=0-8"})
+                self.assertEqual(response.status_code, 206)
+                self.assertEqual(response.content, b"processed")
+                self.assertEqual(response.headers["content-type"], "video/mp4")
+                self.assertIn("no-store", response.headers["cache-control"])
+                self.assertEqual((await client.get(base + "/thumbnail")).content, b"processed-thumbnail")
+                for bad in (base.replace("/files/0", "/files/-1"), base.replace("/samples/0", "/samples/9"),
+                            base.replace(state["id"], "0" * 32), base + "/other"):
+                    self.assertEqual((await client.get(bad + ("/video" if not bad.endswith("other") else ""))).status_code, 404)
+                with patch.object(main, "AUTH_PASSWORD", "test-password"):
+                    self.assertEqual((await client.get(base + "/video")).status_code, 401)
+                root = main.RESUMABLE_UPLOAD_DIR / session / "estimate-previews" / state["id"]
+                (root / "file-0/preview-0.mp4").unlink()
+                await client.post(f"/api/uploads/{session}/estimate", data=form)
+                newer = await self.finish(client, session)
+                self.assertEqual(newer["status"], "done")
+                self.assertNotEqual(state["id"], newer["id"])
+                self.assertFalse(root.exists())
+                self.assertEqual((await client.get(base + "/thumbnail")).status_code, 404)
+        with patch.object(main, "estimate_file", side_effect=self.trial) as trial:
+            asyncio.run(scenario())
+        self.assertEqual(trial.call_count, 2)
+
+    def test_preview_publish_failure_reports_error_and_releases_session(self):
+        original_replace = Path.replace
+        def replace(path, target):
+            if path.name == "file-0":
+                raise OSError("Cannot publish trial sample")
+            return original_replace(path, target)
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                await client.post(f"/api/uploads/{session}/estimate", data={"encoder_device": "cpu"})
+                state = await self.finish(client, session)
+                self.assertEqual(state["status"], "error")
+                self.assertEqual(state["failed_count"], 1)
+                self.assertNotIn("totals", state)
+                self.assertIn("Cannot publish", state["files"][0]["error"])
+                self.assertFalse(main.encoding_work_lock.locked())
+                self.assertNotIn(session, main.completing_upload_sessions)
+                self.assertEqual(list((main.RESUMABLE_UPLOAD_DIR / session).glob("estimate-work-*")), [])
+        with patch.object(main, "estimate_file", side_effect=self.trial), patch.object(Path, "replace", replace):
+            asyncio.run(scenario())
 
     def test_cancel_keeps_source_and_blocks_conflicting_session_operations(self):
         started = threading.Event()
@@ -198,6 +256,43 @@ class MediaValidationTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
 class EstimationFfmpegTest(unittest.TestCase):
+    def test_retained_samples_preserve_encoded_pixels_audio_and_resolution(self):
+        settings = main.build_job_settings("true", "true", "top-right", "10", "2", "32", "h264",
+                                           "veryfast", "6.25", "6.25", "cpu")
+        original_prepare = size_estimation.prepare_preview
+        checked = []
+        def verify_preview(output, index, duration, canceled, terminate):
+            original_prepare(output, index, duration, canceled, terminate)
+            preview = output.parent / f"preview-{index}.mp4"
+            def pixels(path):
+                return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0",
+                    "-f", "hash", "-hash", "sha256", "-"], check=True, capture_output=True, timeout=30).stdout
+            self.assertEqual(pixels(output), pixels(preview))
+            streams = size_estimation._probe_video(str(preview))["streams"]
+            video = next(s for s in streams if s["codec_type"] == "video")
+            self.assertEqual((video["width"], video["height"]), (320, 240))
+            self.assertTrue(any(s["codec_type"] == "audio" for s in streams))
+            with Image.open(output.parent / f"thumbnail-{index}.jpg") as thumbnail:
+                self.assertEqual(thumbnail.size, (320, 240))
+            checked.append(index)
+        with tempfile.TemporaryDirectory() as folder, patch.object(size_estimation, "prepare_preview", side_effect=verify_preview):
+            folder = Path(folder)
+            source = folder / "source.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15",
+                "-f", "lavfi", "-i", "sine=frequency=440", "-t", "30", "-c:v", "libx264", "-c:a", "aac",
+                str(source)], check=True, capture_output=True, timeout=30)
+            for fmt in ("h264", "h265", "mkv"):
+                with self.subTest(format=fmt):
+                    work = folder / fmt
+                    work.mkdir()
+                    result = size_estimation.estimate_file(source, work, {**settings, "format_type": fmt}, "cpu", 4,
+                        threading.Event(), main.terminate_process, lambda *_args: None, True)
+                    self.assertEqual(len(result["samples"]), 3)
+                    self.assertAlmostEqual(result["samples"][1]["start_sec"], 11)
+                    self.assertEqual(len(list(work.glob("preview-*.mp4"))), 3)
+                    self.assertFalse(list(work.glob("sample-*")))
+        self.assertEqual(len(checked), 9)
+
     def test_real_estimates_cover_actual_h264_h265_and_mkv_with_audio_and_watermarks(self):
         settings = main.build_job_settings("true", "true", "top-right", "10", "2", "32", "h264",
                                            "veryfast", "6.25", "6.25", "cpu")

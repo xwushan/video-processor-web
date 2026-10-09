@@ -137,14 +137,25 @@ def main():
         assert estimate['status'] == 'done', estimate
         assert estimate['files'][0]['full_trial'], estimate
         assert estimate['files'][0]['encoder_device'] == ('nvidia' if args.gpu else 'cpu'), estimate
+        sample_base = f"{estimate_path}/{estimate['id']}/files/0/samples/0"
+        thumbnail = request(sample_base + '/thumbnail')
+        assert thumbnail.startswith(b'\xff\xd8'), 'Preview thumbnail must be an encoded JPEG'
+        preview = request(sample_base + '/video')
+        assert b'ftyp' in preview[:32], 'Preview must be a playable MP4 container'
+        assert request(sample_base + '/video', headers={'Range': 'bytes=0-31'}) == preview[:32]
         cached = payload(estimate_path, data=body, headers=headers)
         assert cached['id'] == estimate['id'] and cached['status'] == 'done', cached
         assert payload('/api/current-job')['job'] is None, 'Estimation must not create a processing job'
         job_id = payload(f'/api/uploads/{session_id}/complete', data=body, headers=headers)['id']
+        try:
+            request(sample_base + '/video')
+            raise AssertionError('Starting an actual job must clear trial samples')
+        except HTTPError as error:
+            assert error.code == 404
         file, _ = verify(job_id, 'h265', 'nvidia' if args.gpu else 'cpu')
         output_size = int(command('stat', '-c', '%s', file['output_path']))
         assert estimate['totals']['min_bytes'] <= output_size <= estimate['totals']['max_bytes'], (estimate, output_size)
-        print('PASS: size estimation includes audio/watermarks, caches matching parameters, and reuses uploads for actual encoding', flush=True)
+        print('PASS: size estimation, encoded sample/thumbnail/Range playback, parameter cache, upload reuse, and sample cleanup', flush=True)
         print('PASS: resumable upload preserves GPU parameters; strict GPU rejection does not lock the upload session', flush=True)
 
         command('ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:size=320x240:rate=15',

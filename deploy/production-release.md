@@ -9,7 +9,7 @@ CPU 与 GPU 并发均根据资源增加，GPU 默认上限 8，新增任务的�
 首次部署复制 `.env.example` 到 `.env`；已有部署保留原 `.env`，补充新增配置。
 设置独立的 `VIDEO_PROCESSOR_AUTH_PASSWORD`，可同时设置登录名、内网地址和端口。
 使用正式配置时空密码会在 Compose 解析阶段被拒绝。设置 `chmod 600 .env`，密码和 Webhook 不进 Git。
-当前应用版本为 1.2.0；每次构建用 Git 提交号作为镜像标签及 revision。
+当前应用版本为 1.3.0；每次构建用 Git 提交号作为镜像标签及 revision。
 
 在源码根目录执行以下命令。三个 Compose 文件始终一起使用；原部署的工作目录和 Compose
 项目名保持一致，避免创建一个新的空数据卷。更换目录前通过 `docker compose ls` 确认原项目名，
