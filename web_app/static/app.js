@@ -35,6 +35,8 @@ const encoderDevice = document.querySelector("#encoderDevice");
 const gpuPreset = document.querySelector("#gpuPreset");
 const outputFormat = document.querySelector("#outputFormat");
 const encoderDeviceHint = document.querySelector("#encoderDeviceHint");
+const gpuPresetHint = document.querySelector("#gpuPresetHint");
+const parameterTooltip = document.querySelector("#parameterTooltip");
 const previewVideo = document.querySelector("#previewVideo");
 const previewWatermark = document.querySelector("#previewWatermark");
 const previewDynamicWatermark = document.querySelector("#previewDynamicWatermark");
@@ -53,6 +55,7 @@ const sizeEstimateResult = document.querySelector("#sizeEstimateResult");
 const currentProgressText = document.querySelector("#currentProgressText");
 const currentProgressBar = document.querySelector("#currentProgressBar");
 const currentJobMeta = document.querySelector("#currentJobMeta");
+const currentJobStatus = document.querySelector("#currentJobStatus");
 const currentResourceMeta = document.querySelector("#currentResourceMeta");
 const currentFiles = document.querySelector("#currentFiles");
 const pauseJobBtn = document.querySelector("#pauseJobBtn");
@@ -132,6 +135,7 @@ let recordErrorDetails = new Map();
 let recordsPageNumber = 1;
 let systemStatusRequestInFlight = false;
 let encodingConfig = null;
+let activeParameterHelp = null;
 const encodingFields = ["encoder_device", "format_type", "crf", "encoder_preset", "gpu_quality", "gpu_preset"];
 let savedEncodingSettings = {};
 try {
@@ -152,6 +156,71 @@ const ENCODER_PRESET_HINTS = {
   medium: "体积优先会花更多时间压缩，输出文件通常更小，适合不太赶时间的任务。",
   slow: "高压缩会明显降低处理速度，换取更充分的压缩，适合少量视频或对体积更敏感的场景。",
 };
+
+const GPU_PRESET_HINTS = {
+  p1: "极速优先会减少编码器的分析工作，适合赶时间的任务，压缩效率可能降低。",
+  p3: "速度优先减少部分分析工作，适合批量处理，压缩效率可能低于均衡。",
+  p4: "均衡策略兼顾编码速度与压缩效率，适合多数批量任务。",
+  p6: "画质优先会增加分析工作，通常需要更多编码时间，压缩效率可能更好。",
+  p7: "高质量策略进行更充分的分析，通常更慢，适合更在意画质和体积的任务。",
+};
+
+function hideParameterTooltip() {
+  activeParameterHelp?.removeAttribute("aria-describedby");
+  activeParameterHelp = null;
+  parameterTooltip.hidden = true;
+}
+
+function showParameterTooltip(button) {
+  const hint = document.getElementById(button.dataset.hint);
+  if (!hint || !button.getClientRects().length) return hideParameterTooltip();
+  activeParameterHelp?.removeAttribute("aria-describedby");
+  activeParameterHelp = button;
+  parameterTooltip.textContent = hint.textContent;
+  parameterTooltip.hidden = false;
+  button.setAttribute("aria-describedby", parameterTooltip.id);
+  // The tooltip lives outside the cards so their overflow and backdrop filters
+  // cannot clip it or change the coordinate system of this fixed element.
+  const viewportWidth = document.documentElement.clientWidth;
+  parameterTooltip.style.maxWidth = `${Math.min(340, Math.max(0, viewportWidth - 24))}px`;
+  const rect = button.getBoundingClientRect();
+  const tip = parameterTooltip.getBoundingClientRect();
+  const left = Math.max(12, Math.min(rect.left - 8, viewportWidth - tip.width - 12));
+  const below = rect.bottom + 8;
+  const top = below + tip.height <= window.innerHeight - 12 ? below : Math.max(12, rect.top - tip.height - 8);
+  parameterTooltip.style.left = `${left}px`;
+  parameterTooltip.style.top = `${top}px`;
+}
+
+for (const button of document.querySelectorAll(".parameter-help")) {
+  let pointerType = "";
+  button.addEventListener("pointerenter", event => {
+    if (event.pointerType !== "touch") showParameterTooltip(button);
+  });
+  button.addEventListener("pointerleave", event => {
+    if (event.pointerType !== "touch" && activeParameterHelp === button) hideParameterTooltip();
+  });
+  button.addEventListener("pointerdown", event => { pointerType = event.pointerType; });
+  button.addEventListener("focus", () => {
+    if (button.matches(":focus-visible")) showParameterTooltip(button);
+  });
+  button.addEventListener("blur", () => {
+    if (activeParameterHelp === button) hideParameterTooltip();
+  });
+  button.addEventListener("click", event => {
+    if (pointerType === "touch" && event.detail !== 0 && activeParameterHelp === button) hideParameterTooltip();
+    else showParameterTooltip(button);
+    pointerType = "";
+  });
+}
+document.addEventListener("pointerdown", event => {
+  if (!event.target.closest(".parameter-help")) hideParameterTooltip();
+});
+window.addEventListener("keydown", event => {
+  if (event.key === "Escape") hideParameterTooltip();
+});
+window.addEventListener("scroll", hideParameterTooltip, true);
+window.addEventListener("resize", hideParameterTooltip);
 
 function showToast(message, tone = "success") {
   const toast = document.createElement("div");
@@ -209,9 +278,6 @@ function updateEncoderPresetHint() {
     field.hidden = id.startsWith("gpu") ? !usesGpu : usesGpu && encoderDevice.value !== "auto";
     for (const control of field.querySelectorAll("input, select")) control.disabled = field.hidden;
   }
-  const schedulingHint = document.querySelector("#gpuSchedulingHint");
-  schedulingHint.hidden = !usesGpu;
-  schedulingHint.textContent = `GPU 并发自动调节：目标 ${encodingConfig?.gpu_target_percent || 80}%，达到阈值后停止新增任务。`;
   if (!encodingConfig) {
     encoderDeviceHint.textContent = "正在检测服务器编码设备…";
   } else if (usesGpu && available) {
@@ -224,9 +290,11 @@ function updateEncoderPresetHint() {
   } else {
     encoderDeviceHint.textContent = "使用 CPU 编码；GPU 保持可供其他任务使用。";
   }
-  encoderPresetHint.textContent = usesGpu
-    ? "GPU 质量 CQ 越小画质越高，文件通常越大；CQ 与 CPU 的 CRF 不可直接对比。均衡策略适合批量处理，画质优先策略会增加编码耗时。"
-    : ENCODER_PRESET_HINTS[encoderPreset.value] || ENCODER_PRESET_HINTS.veryfast;
+  if (usesGpu) encoderDeviceHint.textContent += ` GPU 并发自动调节，目标 ${encodingConfig?.gpu_target_percent || 80}%，达到阈值后停止新增任务。`;
+  encoderPresetHint.textContent = ENCODER_PRESET_HINTS[encoderPreset.value] || ENCODER_PRESET_HINTS.veryfast;
+  gpuPresetHint.textContent = (GPU_PRESET_HINTS[gpuPreset.value] || GPU_PRESET_HINTS.p4) +
+    " 实际差异也取决于素材和显卡；解码、水印或磁盘成为瓶颈时，切换策略的速度变化可能不明显。";
+  if (activeParameterHelp) showParameterTooltip(activeParameterHelp);
 }
 
 function saveEncodingSettings() {
@@ -239,7 +307,7 @@ function saveEncodingSettings() {
 }
 
 function encoderDescription(file) {
-  if (!file.encoder_name && file.status === "queued") return "等待分配编码设备";
+  if (!file.encoder_name) return file.status === "queued" ? "等待分配编码设备" : "等待编码器启动";
   const device = file.encoder_device === "nvidia" ? "GPU" : "CPU";
   const name = file.encoder_name || (file.status === "queued" ? "待分配" : device);
   return `${device} · ${name}${file.fallback_reason ? " · 已回退到 CPU" : ""}`;
@@ -261,6 +329,20 @@ function fmtRate(bytesPerSecond) {
   return `${fmtSize(bytesPerSecond)}/s`;
 }
 
+function resourcePercent(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value))
+    ? Math.max(0, Math.min(100, Number(value))) : null;
+}
+
+function resourceMeter(label, percent, detail = "") {
+  const value = resourcePercent(percent);
+  return `<div class="resource-meter">
+    <div class="resource-meter-heading"><span>${escapeHtml(label)}</span><strong>${value === null ? "—" : `${Math.round(value)}%`}</strong></div>
+    <div class="resource-track${value === null ? " unavailable" : ""}"><i style="width:${value ?? 0}%"></i></div>
+    ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+  </div>`;
+}
+
 async function loadSystemStatus() {
   if (systemStatusRequestInFlight) return;
   systemStatusRequestInFlight = true;
@@ -268,17 +350,21 @@ async function loadSystemStatus() {
     const res = await fetch("/api/system-status");
     if (!res.ok) return;
     const status = await res.json();
-    currentResourceMeta.textContent =
-      `CPU ${status.cpu_percent}% · 内存 ${status.memory_percent}% · ` +
-      `磁盘可用 ${fmtSize(status.disk_free_bytes)} · ` +
-      `读 ${fmtRate(status.disk_read_bytes_per_sec)} · 写 ${fmtRate(status.disk_write_bytes_per_sec)} · ` +
-      `FFmpeg ${status.active_ffmpeg} 路`;
-    if (status.gpu) {
-      const gpu = status.gpu;
-      currentResourceMeta.textContent += ` · ${gpu.name}` +
-        (gpu.encoder_percent !== null ? ` · 编码器 ${gpu.encoder_percent}%` : "") +
-        (gpu.memory_used_mb !== null && gpu.memory_total_mb !== null ? ` · 显存 ${Math.round(gpu.memory_used_mb)}/${Math.round(gpu.memory_total_mb)} MB` : "");
-    }
+    const gpu = status.gpu;
+    const hasGpuMemory = gpu && Number.isFinite(gpu.memory_used_mb) && Number.isFinite(gpu.memory_total_mb) && gpu.memory_total_mb > 0;
+    const gpuMemory = hasGpuMemory ? `${fmtSize(gpu.memory_used_mb * 1024 * 1024)} / ${fmtSize(gpu.memory_total_mb * 1024 * 1024)}` : "用量暂不可用";
+    currentResourceMeta.innerHTML = `<div class="resource-meters">
+      ${resourceMeter("CPU", status.cpu_percent)}
+      ${resourceMeter("内存", status.memory_percent)}
+      ${gpu ? resourceMeter("GPU 编码器", gpu.encoder_percent) + resourceMeter("显存", hasGpuMemory ? gpu.memory_used_mb / gpu.memory_total_mb * 100 : null, gpuMemory) : ""}
+    </div>
+    <div class="resource-details">
+      <span>磁盘可用 <strong>${escapeHtml(fmtSize(status.disk_free_bytes))}</strong></span>
+      <span>读取 <strong>${escapeHtml(fmtRate(status.disk_read_bytes_per_sec))}</strong></span>
+      <span>写入 <strong>${escapeHtml(fmtRate(status.disk_write_bytes_per_sec))}</strong></span>
+      <span>编码进程 <strong>${escapeHtml(String(status.active_ffmpeg ?? "—"))} 路</strong></span>
+    </div>
+    ${gpu ? `<div class="resource-device">${escapeHtml(gpu.name || "NVIDIA GPU")}</div>` : ""}`;
   } catch {
     // Keep the last successful resource snapshot rather than flashing an error.
   } finally {
@@ -443,9 +529,8 @@ function setControlsLocked(locked) {
   controlsLocked = locked;
   form.classList.toggle("is-locked", locked);
   form.classList.toggle("is-estimating", estimateBusy);
-  // aria-disabled on the form also disables its cancellation control for
-  // assistive technology. During estimation the capture guard locks fields.
-  form.setAttribute("aria-disabled", locked && !estimateBusy ? "true" : "false");
+  // Keep pause/resume/cancel available to assistive technology. Locked fields
+  // are protected by the capture guard, rather than disabling the whole form.
   form.setAttribute("aria-busy", estimateBusy ? "true" : "false");
   const banner = document.querySelector("#lockBanner");
   banner.querySelector("strong").textContent = estimateBusy ? "正在预估，参数已锁定" : "制作中，参数已锁定";
@@ -461,7 +546,13 @@ function setControlsLocked(locked) {
 }
 
 function setProcessingVisible(visible) {
-  form.classList.toggle("is-processing", visible && !estimateBusy);
+  const wasVisible = form.classList.contains("is-processing");
+  const show = visible && !estimateBusy;
+  form.classList.toggle("is-processing", show);
+  if (show && !wasVisible && processPage.classList.contains("active")) {
+    document.getElementById("currentProgressTitle").focus({ preventScroll: true });
+  }
+  if (visible) hideParameterTooltip();
 }
 
 function scrollToProcessingProgress() {
@@ -699,6 +790,14 @@ async function renderSelectedVideos() {
     ? `已选择 ${selectedFiles.length} 个视频，总大小 ${fmtSize(totalSize)}${structure}。可删除单个视频，确认后再开始上传制作。`
     : "选择后会先在这里展示待处理列表，确认参数后再开始上传制作";
   if (!selectedFiles.length) {
+    estimateSignature = null;
+    estimatePreviewState = null;
+    sizeEstimateResult.hidden = true;
+    sizeEstimateResult.innerHTML = "";
+    sizeEstimateResult.classList.remove("stale");
+    sizeEstimateHint.textContent = "先选择视频并设置参数，再点击“预估成品”生成大小和画质样片。";
+    if (activeEstimatePreview) closeVideoPreview();
+    updateProductionAvailability();
     selectedVideosEl.textContent = "拖拽视频到此处，或点击上方选择视频";
     updatePickerText();
     clearPreview();
@@ -934,7 +1033,7 @@ async function loadConfig() {
     encodingConfig = cfg;
     if (!savedEncodingSettings.encoder_device) encoderDevice.value = cfg.encoder_device_default || "auto";
     updateEncoderPresetHint();
-    configText.textContent = `目录 ${cfg.root}，文件保留 ${cfg.file_retention_days} 天，记录保留 ${cfg.record_retention_days} 天`;
+    configText.textContent = `成品保留 ${cfg.file_retention_days} 天，记录保留 ${cfg.record_retention_days} 天`;
   } catch {
     configText.textContent = "配置读取失败，请确认服务正在运行";
   }
@@ -1047,8 +1146,8 @@ async function loadJobs() {
             <span>›</span>
           </button>
           <div class="job-main">
-            <strong>${escapeHtml(job.created_at)}</strong>
-            <div class="meta">任务 ${escapeHtml(job.id)} · ${statusText(job.status)} · ${escapeHtml(job.message || "")}</div>
+            <div class="job-title"><strong>${escapeHtml(job.created_at)}</strong><span class="status-pill status-${job.status}">${escapeHtml(statusText(job.status))}</span></div>
+            <div class="meta" title="任务 ${escapeHtml(job.id)} · ${escapeHtml(job.message || "")}">任务 ${escapeHtml(job.id)} · ${escapeHtml(job.message || "")}</div>
           </div>
           <div class="job-actions">
             <span class="meta">当前并发 ${job.status === "running" ? job.worker_count : 0} · ${job.done_count}/${job.total_count}</span>
@@ -1172,7 +1271,9 @@ function renderCurrent(detail) {
     currentProgressText.textContent = "0%";
     currentProgressBar.style.width = "0%";
     document.querySelector(".progress-ring").style.setProperty("--progress", "0%");
-    currentJobMeta.textContent = "总任务：0　已处理：0/0　任务数：-";
+    document.querySelector(".progress-ring").setAttribute("aria-valuenow", "0");
+    currentJobMeta.innerHTML = "";
+    currentJobStatus.textContent = "等待启动";
     currentFiles.innerHTML = "";
     pauseJobBtn.disabled = true;
     resumeJobBtn.disabled = true;
@@ -1188,7 +1289,13 @@ function renderCurrent(detail) {
   currentProgressText.textContent = `${progress}%`;
   currentProgressBar.style.width = `${progress}%`;
   document.querySelector(".progress-ring").style.setProperty("--progress", `${progress}%`);
-  currentJobMeta.textContent = `总视频：${job.total_count}　已处理：${job.done_count}/${job.total_count}　当前并发：${job.status === "running" ? job.worker_count : 0}`;
+  document.querySelector(".progress-ring").setAttribute("aria-valuenow", String(progress));
+  currentJobStatus.textContent = statusText(job.status);
+  currentJobStatus.className = `status-pill status-${job.status}`;
+  currentJobMeta.innerHTML = [
+    ["视频总数", job.total_count], ["已完成", `${job.done_count} / ${job.total_count}`],
+    ["当前并发", job.status === "running" ? job.worker_count : 0],
+  ].map(([label, value]) => `<div class="current-stat"><span>${label}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("");
   const tree = buildFileTree(files, file => file.original_name);
   currentFiles.innerHTML = renderTreeNodes(tree, {
     scope: `current:${job.id}`,
@@ -1197,12 +1304,19 @@ function renderCurrent(detail) {
     folderMeta: stats => `${stats.done}/${stats.count} 已完成 · ${fmtSize(stats.totalSize)}`,
     renderFile: (entry, depth) => {
       const file = entry.item;
-      const runtime = `<small class="current-file-runtime" title="${escapeHtml(file.fallback_reason || "")}">${escapeHtml(encoderDescription(file))}${file.status === "running" ? ` · ${fmtSpeed(file.speed)}` : ""}</small>`;
+      const state = job.status === "paused" && file.status === "running" ? "paused" : file.status;
+      const percent = displayProgress(file.progress, file.status === "done");
+      const runtime = `${encoderDescription(file)}${state === "running" ? ` · ${fmtSpeed(file.speed)}` : ""}`;
       return `
         <div class="current-file tree-current-file" style="--tree-depth:${depth}">
-          <strong title="${escapeHtml(file.original_name)}">${escapeHtml(entry.name)}</strong>
-          <span class="current-file-state status-${file.status}">${statusText(file.status)}${runtime}</span>
-          <span>${displayProgress(file.progress, file.status === "done")}%</span>
+          <div class="current-file-info">
+            <strong title="${escapeHtml(file.original_name)}">${escapeHtml(entry.name)}</strong>
+            <small class="current-file-runtime" title="${escapeHtml(file.fallback_reason || runtime)}">${escapeHtml(runtime)}</small>
+          </div>
+          <span class="status-pill status-${state}">${escapeHtml(statusText(state))}</span>
+          <div class="current-file-progress" role="progressbar" aria-label="${escapeHtml(entry.name)} 制作进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+            <span>${percent}%</span><div class="bar"><i style="width:${percent}%"></i></div>
+          </div>
         </div>
       `;
     },
@@ -1212,6 +1326,8 @@ function renderCurrent(detail) {
   const cancelable = running || paused;
   pauseJobBtn.disabled = !running;
   resumeJobBtn.disabled = !paused;
+  pauseJobBtn.hidden = paused;
+  resumeJobBtn.hidden = !paused;
   cancelJobBtn.disabled = !cancelable;
   setProcessingVisible(cancelable);
   setControlsLocked(cancelable);
@@ -1884,6 +2000,7 @@ jobsEl.addEventListener("click", async (event) => {
     setControlsLocked(true);
     showPage("process");
     await loadCurrentJob();
+    requestAnimationFrame(scrollToProcessingProgress);
     return;
   }
 
@@ -1894,6 +2011,7 @@ jobsEl.addEventListener("click", async (event) => {
 });
 pauseJobBtn.addEventListener("click", async () => {
   if (!currentJobId) return;
+  const restoreFocus = document.activeElement === pauseJobBtn;
   pauseJobBtn.disabled = true;
   try {
     await postJobAction(`/api/jobs/${currentJobId}/pause`);
@@ -1901,9 +2019,11 @@ pauseJobBtn.addEventListener("click", async () => {
     alert(error.message);
   }
   await loadCurrentJob();
+  if (restoreFocus && processPage.classList.contains("active") && !resumeJobBtn.hidden && !resumeJobBtn.disabled) resumeJobBtn.focus({ preventScroll: true });
 });
 resumeJobBtn.addEventListener("click", async () => {
   if (!currentJobId) return;
+  const restoreFocus = document.activeElement === resumeJobBtn;
   resumeJobBtn.disabled = true;
   try {
     await postJobAction(`/api/jobs/${currentJobId}/resume`);
@@ -1912,6 +2032,7 @@ resumeJobBtn.addEventListener("click", async () => {
     alert(error.message);
   }
   await loadCurrentJob();
+  if (restoreFocus && processPage.classList.contains("active") && !pauseJobBtn.hidden && !pauseJobBtn.disabled) pauseJobBtn.focus({ preventScroll: true });
 });
 cancelJobBtn.addEventListener("click", async () => {
   if (!currentJobId) return;

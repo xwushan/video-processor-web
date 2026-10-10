@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20261009-estimate-first">
+  <link rel="stylesheet" href="/static/app.css?v=20261010-ui-refinement">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -52,29 +52,37 @@
           <strong>制作中，参数已锁定</strong>
           <span>当前任务未完成前，视频列表和水印参数会保持不变，避免处理结果和记录错位。</span>
         </div>
-        <div id="processingOverlay" class="processing-overlay">
+        <div id="processingOverlay" class="processing-overlay" role="region" aria-labelledby="currentProgressTitle">
           <div class="processing-card">
-            <div class="row between">
-              <div>
-                <h2>当前处理进度</h2>
+            <div class="processing-heading">
+              <div class="processing-title">
+                <h2 id="currentProgressTitle" tabindex="-1">当前处理进度</h2>
+                <span id="currentJobStatus" class="status-pill">等待启动</span>
+                <p class="meta">制作期间参数保持锁定，可暂停或取消当前任务。</p>
               </div>
-                <div class="current-actions">
-                  <button id="pauseJobBtn" type="button" class="ghost" disabled>暂停</button>
-                  <button id="resumeJobBtn" type="button" disabled>继续</button>
-                  <button id="cancelJobBtn" type="button" class="danger" disabled>取消任务</button>
-                </div>
+              <div class="current-actions">
+                <button id="pauseJobBtn" type="button" class="ghost" disabled>暂停</button>
+                <button id="resumeJobBtn" type="button" hidden disabled>继续制作</button>
+                <button id="cancelJobBtn" type="button" class="danger" disabled>取消任务</button>
+              </div>
             </div>
             <div class="current-grid">
-              <div class="progress-ring">
+              <div class="progress-ring" role="progressbar" aria-label="总体制作进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                 <span id="currentProgressText">0%</span>
               </div>
-              <div>
+              <div class="current-summary">
+                <div id="currentJobMeta" class="current-meta"></div>
                 <div class="bar current-bar"><i id="currentProgressBar"></i></div>
-                <div id="currentJobMeta" class="current-meta">总任务：0　已处理：0/0　任务数：-</div>
-                <div id="currentResourceMeta" class="current-resource-meta">资源状态：等待任务启动</div>
-                <div id="currentFiles" class="current-files"></div>
               </div>
             </div>
+            <section class="current-resources" aria-label="服务器资源状态">
+              <div class="current-section-heading"><h3>资源状态</h3><span class="meta">自动调节并发</span></div>
+              <div id="currentResourceMeta" class="current-resource-meta">等待读取资源状态…</div>
+            </section>
+            <section class="current-details" aria-label="视频制作明细">
+              <div class="current-section-heading"><h3>视频明细</h3><span class="meta">编码设备 · 实时速度</span></div>
+              <div id="currentFiles" class="current-files"></div>
+            </section>
           </div>
         </div>
         <div class="process-layout">
@@ -193,22 +201,28 @@
             <p class="meta">设置完成后，先预估成品大小并查看处理后的画质。</p>
           </div>
           <div class="grid three">
-            <label>编码设备
+            <div class="parameter-field">
+              <div class="parameter-heading"><label for="encoderDevice">编码设备</label><button type="button" class="parameter-help" data-hint="encoderDeviceHint" aria-label="编码设备说明">?</button></div>
               <select id="encoderDevice" name="encoder_device">
                 <option value="auto" selected>自动选择：优先 GPU</option>
                 <option value="cpu">CPU 编码</option>
                 <option value="nvidia">NVIDIA GPU 编码</option>
               </select>
-            </label>
-            <label>导出格式
+            </div>
+            <div class="parameter-field">
+              <div class="parameter-heading"><label for="outputFormat">导出格式</label><button type="button" class="parameter-help" data-hint="outputFormatHint" aria-label="导出格式说明">?</button></div>
               <select id="outputFormat" name="format_type">
                 <option value="h264" selected>MP4 H.264</option>
                 <option value="h265">MP4 H.265</option>
                 <option value="mkv">MKV H.264</option>
               </select>
-            </label>
-            <label id="cpuQualityField">CPU 质量 CRF<input type="number" name="crf" min="20" max="51" value="32"></label>
-            <label id="cpuPresetField">CPU 编码策略
+            </div>
+            <div id="cpuQualityField" class="parameter-field">
+              <div class="parameter-heading"><label for="cpuQuality">CPU 质量 CRF</label><button type="button" class="parameter-help" data-hint="cpuQualityHint" aria-label="CPU 质量 CRF 说明">?</button></div>
+              <input id="cpuQuality" type="number" name="crf" min="20" max="51" value="32">
+            </div>
+            <div id="cpuPresetField" class="parameter-field">
+              <div class="parameter-heading"><label for="encoderPreset">CPU 编码策略</label><button type="button" class="parameter-help" data-hint="encoderPresetHint" aria-label="CPU 编码策略说明">?</button></div>
               <select id="encoderPreset" name="encoder_preset">
                 <option value="ultrafast">极速优先：最快，文件较大</option>
                 <option value="veryfast" selected>速度优先：批量处理推荐</option>
@@ -216,9 +230,13 @@
                 <option value="medium">体积优先：更小但更慢</option>
                 <option value="slow">高压缩：最慢，体积更小</option>
               </select>
-            </label>
-            <label id="gpuQualityField" hidden>GPU 质量 CQ<input type="number" name="gpu_quality" min="1" max="51" value="26"></label>
-            <label id="gpuPresetField" hidden>GPU 编码策略
+            </div>
+            <div id="gpuQualityField" class="parameter-field" hidden>
+              <div class="parameter-heading"><label for="gpuQuality">GPU 质量 CQ</label><button type="button" class="parameter-help" data-hint="gpuQualityHint" aria-label="GPU 质量 CQ 说明">?</button></div>
+              <input id="gpuQuality" type="number" name="gpu_quality" min="1" max="51" value="26">
+            </div>
+            <div id="gpuPresetField" class="parameter-field" hidden>
+              <div class="parameter-heading"><label for="gpuPreset">GPU 编码策略</label><button type="button" class="parameter-help" data-hint="gpuPresetHint" aria-label="GPU 编码策略说明">?</button></div>
               <select id="gpuPreset" name="gpu_preset">
                 <option value="p1">极速优先</option>
                 <option value="p3">速度优先</option>
@@ -226,10 +244,13 @@
                 <option value="p6">画质优先</option>
                 <option value="p7">高质量：更慢</option>
               </select>
-            </label>
-            <p id="gpuSchedulingHint" class="param-hint" hidden>GPU 并发自动调节：目标 80%，达到阈值后停止新增任务。</p>
-            <p id="encoderDeviceHint" class="param-hint">正在检测服务器编码设备…</p>
-            <p id="encoderPresetHint" class="param-hint">速度优先适合批量处理，编码速度更快，文件体积可能略大。</p>
+            </div>
+            <span id="encoderDeviceHint" hidden>正在检测服务器编码设备…</span>
+            <span id="outputFormatHint" hidden>H.264 兼容性较好；H.265 通常能进一步压缩体积，但编码可能更慢，部分浏览器无法播放。MKV 使用 H.264 编码，适合本地播放器观看。</span>
+            <span id="cpuQualityHint" hidden>CRF 越小画质越高，文件通常越大；越大则压缩更强。当前支持 20–51。自动模式回退到 CPU 时，也会使用这里的 CPU 参数。</span>
+            <span id="encoderPresetHint" hidden>速度优先适合批量处理，编码速度更快，文件体积可能略大。</span>
+            <span id="gpuQualityHint" hidden>CQ 越小画质越高，文件通常越大，支持 1–51。CQ 与 CPU 的 CRF 不可直接对比；建议用预估样片查看画质后再调整。</span>
+            <span id="gpuPresetHint" hidden>均衡策略适合批量处理；画质优先通常会增加编码耗时。</span>
             <div class="estimate-params-actions">
               <button id="estimateSizeBtn" type="button" disabled>预估成品</button>
               <button id="cancelEstimateBtn" type="button" class="text" hidden>取消预估</button>
@@ -336,6 +357,7 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=20261009-estimate-first"></script>
+  <div id="parameterTooltip" class="parameter-tooltip" role="tooltip" hidden></div>
+  <script src="/static/app.js?v=20261010-ui-refinement"></script>
 </body>
 </html>
