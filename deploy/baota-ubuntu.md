@@ -1,38 +1,63 @@
-# Ubuntu + 宝塔：离线部署视频处理器
+# 公司 Ubuntu 服务器：在宝塔 Docker 导入镜像并部署
 
-适用：Ubuntu x86_64、Docker Engine + Compose v2、NVIDIA RTX 3090。镜像版本 1.3.8，CPU CRF 与 GPU CQ 默认均为 32。
+适用：Ubuntu x86_64、已安装宝塔和 Docker、NVIDIA RTX 3090。交付的是 **Linux/amd64 Docker 镜像**。应用版本 1.3.8，CPU CRF 与 GPU CQ 默认均为 32。
 
-使用宝塔的文件管理上传部署包，再通过宝塔终端执行 Compose。这样能完整保留 GPU 配置，减少不同面板版本的表单差异。启动后可在宝塔 Docker 的容器列表查看日志、状态与资源；参数更新在同一部署目录执行 Compose。宝塔支持镜像导入和 Compose，参考[官方 Docker 手册](https://www.bt.cn/bbs/thread-95674-1-1.html)。
+部署流程：**宝塔文件上传并解压交付包 → 宝塔 Docker 导入 image.tar → 创建容器 → 浏览器访问**。镜像已包含应用、Python、FFmpeg 和运行依赖，导入及启动应用无需从 Docker Hub 拉取镜像，也不用在服务器安装项目源码。
 
-本文用于首次部署。已有服务先按原配置备份，保持项目名和数据挂载路径；不要用空的 `data` 目录替代原数据。
+以下以宝塔界面操作为主。不同版本菜单可能显示“镜像”或“本地镜像”；GPU 表单选项以实际面板为准。导入镜像、创建容器及端口/目录/环境变量配置见[宝塔官方 Docker 手册](https://www.bt.cn/bbs/thread-95674-1-1.html)。
 
-## 1. 检查宿主机环境
+## 1. 上传部署包并导入镜像
 
-在宝塔左侧“Docker”安装或检查 Docker 服务；若已经存在，不重复安装。打开宝塔终端，在 Ubuntu 宿主机执行：
+1. 在宝塔“文件”中新建 `/www/server/docker/video-processor-web`。
+2. 上传交付的 `*-baota.zip`，在宝塔文件管理中解压到这个目录。该目录下应直接出现 `image.tar`。
+3. 进入 **Docker → 镜像/本地镜像 → 导入镜像**，选择服务器上的 `/www/server/docker/video-processor-web/image.tar`。
+4. 等待导入完成，在本地镜像列表确认出现 `video-processor-web:1.3.8-<提交号>`。**完整标签见交付包的 `release.json`，创建容器时选择这个标签。**
+
+交付包内容：
+
+| 文件 | 用途 |
+| --- | --- |
+| `image.tar` | 可直接导入的 Docker 镜像，包含 CPU 和 NVIDIA 编码能力 |
+| `DEPLOY.md` | 本说明 |
+| `CONTAINER-SETTINGS.txt` | 当前发布镜像的容器配置速查表 |
+| `docker-compose.yml` | 宝塔容器编排备用配置，包含 GPU 透传和运行限制 |
+| `.env.example` | 编排参数模板，镜像标签已填，登录密码需自己设置 |
+| `release.json` | 版本、完整 Git 提交号、镜像标签 |
+| `VALIDATION.md` | 发布检查结果及适用范围 |
+| `SHA256SUMS` | 包内文件校验值 |
+| `validate_docker.py` | 部署后可选的功能自检脚本 |
+
+需要核对传输完整性时，可在宝塔终端进入上述目录执行 `sha256sum -c SHA256SUMS`，应全部为 `OK`。镜像来自 `docker save`，对应的是加载镜像；不要选择把文件系统转换为新镜像的 `docker import`。
+
+## 2. 准备数据目录
+
+在宝塔文件管理中新建 `/www/server/docker/video-processor-web/data`，用于保存数据库、原视频、成品、水印和续传数据。也可以使用服务器容量足够的数据盘目录，后面挂载时填写实际路径。
+
+镜像使用 UID/GID **1000:1000** 的普通用户运行。首次部署可在宝塔终端设置这个新目录的权限：
 
 ```bash
-uname -m
-docker version
-docker compose version
+sudo install -d -m 0750 -o 1000 -g 1000 /www/server/docker/video-processor-web/data
+df -h /www/server/docker/video-processor-web/data
+```
+
+**数据目录所在磁盘须至少剩余 20 GiB，另外预留原视频和成品所需空间。** 默认低于 20 GiB 会拒绝上传并返回 HTTP 507，避免处理过程中磁盘耗尽。这是数据盘剩余空间阈值，不是为容器分配 20 GB。
+
+已有部署应继续挂载原数据目录并先备份。不要以新建空目录替换已有数据。已有文件的权限也需要允许 UID 1000 读写；只处理本项目目录。
+
+## 3. 确认服务器能向 Docker 提供 GPU
+
+CPU 编码不需要这一步；使用 RTX 3090 编码时需要 **Ubuntu NVIDIA 驱动 + NVIDIA Container Toolkit**。这两项属于服务器配置，不能只靠导入应用镜像替代。宝塔安装 Docker 后也需要满足这两个条件。
+
+在宝塔终端执行宿主机命令：
+
+```bash
 nvidia-smi
+docker version
 ```
 
-架构应为 `x86_64`，Compose 应为 v2，`nvidia-smi` 应识别 RTX 3090。镜像包含 Python 和 FFmpeg，宿主机无需单独安装它们。驱动与 NVIDIA Container Toolkit 属于宿主机依赖，需要提前准备。
+`nvidia-smi` 应识别 RTX 3090。如果已有 GPU 容器能正常使用这张卡，可保留现有配置。
 
-若 `nvidia-smi` 已正常，保留现有驱动。驱动未安装时，可按 Ubuntu 的工具选择服务器驱动：
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ubuntu-drivers-common
-sudo ubuntu-drivers list --gpgpu
-sudo ubuntu-drivers install --gpgpu
-```
-
-按安装结果在维护时间重启服务器，重新确认 `nvidia-smi`。内网无软件源时先准备与 Ubuntu 版本、内核匹配的驱动软件包；不能仅凭 `lspci` 判断驱动可用。来源：[Ubuntu NVIDIA 驱动安装说明](https://ubuntu.com/server/docs/how-to/graphics/install-nvidia-drivers/)。
-
-## 2. 配置容器 GPU 访问
-
-若 GPU 容器已能正常运行，可跳过安装。否则，在可访问 NVIDIA 软件源的 Ubuntu 终端执行：
+若尚未安装 Container Toolkit，在服务器能访问 NVIDIA 软件源时执行：
 
 ```bash
 sudo apt-get update
@@ -45,102 +70,91 @@ sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-最后一步会重启 Docker 服务，应在其他容器允许重启时执行。内网受限时提前离线安装上述系统依赖；加载应用镜像本身不需要访问 Docker Hub 或 PyPI。来源：[NVIDIA 官方安装与 Docker 配置说明](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
+最后一步会重启 Docker 服务，应安排在其他容器允许重启时执行。公司内网不能访问软件源时，由运维提前准备匹配系统的离线安装包。来源：[NVIDIA 官方说明](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
 
-## 3. 上传、解压并导入镜像
+驱动尚未安装时，按公司维护流程和 [Ubuntu NVIDIA 驱动说明](https://ubuntu.com/server/docs/how-to/graphics/install-nvidia-drivers/)安装服务器驱动；仅有 `lspci` 输出不能确认编码可用。
 
-在宝塔“文件”中新建固定目录 `/www/server/docker/video-processor-web`，将交付的 `*-baota.zip` 上传并解压到该目录。确保该目录直接包含以下文件，而不是额外套一层目录：
+## 4. 在宝塔创建容器
+
+在导入的镜像上点击“创建容器”，或在“容器”中添加并选择该镜像。填写：
+
+| 宝塔字段 | 设置 |
+| --- | --- |
+| 容器名称 | `video-processor-web` |
+| 镜像 | 选择 `release.json` 中的完整镜像标签 |
+| 网络 | `bridge` |
+| 端口映射 | **宿主机 8899 → 容器 8899 / TCP**；添加后确认已出现在映射列表 |
+| 挂载目录 | **宿主机 `/www/server/docker/video-processor-web/data` → 容器 `/data/video-processor`**，读写；添加后确认已生效 |
+| 启动命令 | **留空**，使用镜像默认命令 |
+| 重启规则 | `unless-stopped`，或面板提供的自动重启规则 |
+| 停止后自动删除 | 不勾选 |
+| CPU/内存限制 | 首次部署可不设置额外配额，应用按实际资源调节并发 |
+| 特权模式 | 不勾选 |
+| GPU | 如果表单支持 GPU 设备请求，启用 NVIDIA GPU 并选择第 0 张卡；如果没有该选项，使用下一节的宝塔容器编排 |
+
+环境变量逐项添加，账号密码由自己填写：
+
+| 名称 | 值 |
+| --- | --- |
+| `TZ` | `Asia/Shanghai` |
+| `VIDEO_PROCESSOR_ROOT` | `/data/video-processor` |
+| `VIDEO_PROCESSOR_AUTH_USER` | `admin`，可改 |
+| `VIDEO_PROCESSOR_AUTH_PASSWORD` | **自己设置的非空长密码**，不要使用公开示例密码 |
+| `VIDEO_PROCESSOR_ENCODER_DEVICE` | `auto`，优先 GPU，不可用时允许 CPU |
+| `NVIDIA_DRIVER_CAPABILITIES` | `compute,video,utility` |
+| `VIDEO_PROCESSOR_GPU_MAX_CONCURRENT` | `8`，自动并发的安全上限 |
+| `VIDEO_PROCESSOR_GPU_CPU_THREADS` | `4` |
+| `VIDEO_PROCESSOR_MIN_FREE_GB` | `20` |
+| `VIDEO_PROCESSOR_FILE_RETENTION_DAYS` | `14`，成品保留天数 |
+| `VIDEO_PROCESSOR_RECORD_RETENTION_DAYS` | `90`，记录保留天数 |
+
+创建容器后，密码通过环境变量生效。**仅把密码写到宿主机 `.env` 文件不会自动传给普通“创建容器”表单。** 普通容器方式不需要填写镜像构建参数或上传源码。
+
+`NVIDIA_DRIVER_CAPABILITIES` 是驱动能力声明，不能替代实际 GPU 透传。也不要把 `--gpus` 填进“启动命令”，该字段是应用启动命令。CPU 和 GPU 使用同一个交付镜像。
+
+保留镜像的普通用户和默认单 worker 启动方式。不要同时创建两个应用容器挂载同一个数据目录。
+
+## 5. 若宝塔表单没有 GPU 选项：在宝塔导入编排
+
+这种方式仍是 **宝塔管理同一个 Docker 引擎和已导入镜像**，无需另外搭建运行环境。应用容器用本节替代上一节创建，不要两种方式各建一个。
+
+1. 在宝塔“文件”中把 `.env.example` 复制为 `.env`，保留交付包已填写的镜像标签，设置非空 `VIDEO_PROCESSOR_AUTH_PASSWORD`；其他变量可沿用模板。密码建议用单引号包住，包含单引号时须按 Compose 环境文件规则转义。
+2. 确认 `VIDEO_PROCESSOR_DATA_DIR` 指向第 2 节准备的数据目录，`VIDEO_PROCESSOR_GPU_DEVICE_ID=0`。
+3. 在 **Docker → 容器编排/Compose → 添加项目** 中，从文件选择交付包里的 `docker-compose.yml`，项目目录设置为 `/www/server/docker/video-processor-web`，并让配置读取该目录的 `.env`。若页面单独要求环境变量，就把 `.env` 中的参数填入该页面。
+4. 检查镜像为已经导入的完整标签、端口为 8899、挂载为上述数据目录，再创建并启动。配置使用本地镜像，不包含构建或在线拉取步骤。
+
+宝塔 [11.0.0 更新记录](https://docs.bt.cn/update-log/)已列出“容器编排支持直接选择文件创建”；旧版可使用对应的 Compose 模板入口，并按其界面设置项目目录和环境变量。如果该版本无法传入环境变量，先在宝塔编辑器中将编排中的 `${变量…}` 替换为实际值，再创建项目；密码使用 YAML 单引号字符串，密码中的单引号须写成两个单引号。保存配置到受限目录，避免公开账号密码。
+
+此编排已经配置 NVIDIA 第 0 张卡透传、登录密码检查、数据持久化、非 root 用户、只读根文件系统、可写 `/tmp`、日志轮转和自动重启，适合复用。普通容器表单不要单独勾选只读根文件系统，除非同时配置了可写 `/tmp`。
+
+## 6. 启动后验收
+
+在宝塔容器列表查看状态和日志；启动后等待健康状态为 `healthy`。另一台内网电脑打开：
 
 ```text
-image.tar.gz             离线 Linux/amd64 镜像
-docker-compose.yml       含 GPU、登录保护及数据持久化的独立编排
-.env.example             已填写镜像标签，登录密码留空
-DEPLOY.md                本部署说明
-release.json             版本、完整提交号、镜像标签和镜像 ID
-VALIDATION.md            本次发布验证结果
-SHA256SUMS               文件校验值
-validate_docker.py       上线后的功能自检
+http://Ubuntu服务器IP:8899
 ```
 
-终端执行：
+服务器 IP 使用公司的 Ubuntu 地址，输入第 4 或第 5 节设置的账号密码。`http://服务器IP:8899/health` 的版本应为 1.3.8、提交号应与 `release.json` 一致。
+
+进入宝塔中该应用容器的“终端”，执行：
 
 ```bash
-cd /www/server/docker/video-processor-web
-sha256sum -c SHA256SUMS
-docker load -i image.tar.gz
-test -e .env || cp .env.example .env
-chmod 600 .env
+nvidia-smi
+python -c 'from web_app.encoding import get_gpu_capabilities; print(get_gpu_capabilities())'
+ffmpeg -hide_banner -v error -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -c:v h264_nvenc -preset p4 -f null -
+ffmpeg -hide_banner -v error -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -c:v hevc_nvenc -preset p4 -f null -
 ```
 
-校验应全部显示 `OK`，然后才能导入。Docker 支持直接读取 gzip 压缩镜像，不必手动解压镜像。[Docker 导入说明](https://docs.docker.com/reference/cli/docker/image/load/)
+显卡检测应显示服务器的 RTX 3090，H.264/H.265 可用，两条试编码命令均正常退出。不要仅以 FFmpeg 的编码器列表确认 GPU 可用。自动模式可能回退 CPU，实际设备和原因可以在网页查看。
 
-这一步使用 `docker load` 导入完整镜像，不能用 `docker import`。也可用宝塔“Docker → 本地镜像 → 导入”选择镜像；若面板不支持 `.tar.gz`，使用上述终端命令。
+最后通过另一台电脑验证：选择视频 → 预估成品 → 查看最多 3 个随机抽中的样片 → 开始制作 → 下载。正式制作应包含全部视频；刷新、调整参数和开始制作会清理旧样片。
 
-## 4. 配置账号、数据目录与端口
+### 内网端口与可选 HTTPS
 
-在宝塔文件编辑器打开 `.env`。保留交付模板内的 `VIDEO_PROCESSOR_IMAGE_TAG` 和 `VIDEO_PROCESSOR_REVISION`，修改：
+直接访问时允许所需内网客户端连接服务器 8899。Docker 端口发布可能绕过 UFW，需要核对实际网络访问规则。来源：[Docker 官方防火墙说明](https://docs.docker.com/engine/install/ubuntu/#firewall-limitations)。
 
-```dotenv
-COMPOSE_PROJECT_NAME=video-processor-web
-VIDEO_PROCESSOR_AUTH_USER=admin
-VIDEO_PROCESSOR_AUTH_PASSWORD='填写自己的长随机密码'
-VIDEO_PROCESSOR_PORT=8899
-VIDEO_PROCESSOR_BIND_IP=0.0.0.0
-VIDEO_PROCESSOR_DATA_DIR=/www/server/docker/video-processor-web/data
-VIDEO_PROCESSOR_ENCODER_DEVICE=auto
-VIDEO_PROCESSOR_GPU_DEVICE_ID=0
-VIDEO_PROCESSOR_GPU_MAX_CONCURRENT=8
-VIDEO_PROCESSOR_GPU_CPU_THREADS=4
-```
-
-密码必须填写，空密码会阻止启动。密码建议用单引号包住，尤其包含 `$`、空格或 `#` 时。不要把 `.env` 提交到 Git，或放进网站公开目录。
-
-`VIDEO_PROCESSOR_DATA_DIR` 可改为容量足够的数据盘目录；下方创建目录和权限命令也同步替换。这里保存数据库、原视频、成品、水印和续传缓存。应用成品默认保留 14 天、记录保留 90 天，时间可在 `.env` 调整。
-
-首次部署，在宿主机预先创建空的数据目录并让容器用户 UID/GID 1000 可写：
-
-```bash
-sudo install -d -m 0750 -o 1000 -g 1000 /www/server/docker/video-processor-web/data
-df -h /www/server/docker/video-processor-web/data
-```
-
-编排不会自动创建错误路径，避免挂载错误而启动出一套空数据。已有目录里的文件也需给 UID/GID 1000 所需权限；先确认该路径只用于本项目，再处理权限，不要对其他服务目录执行递归权限修改。
-
-## 5. 启动与检查
-
-```bash
-cd /www/server/docker/video-processor-web
-docker compose config --quiet
-docker compose up -d --no-build --pull never --wait --wait-timeout 90
-docker compose ps
-docker compose logs --tail=100
-curl --fail http://127.0.0.1:8899/health
-docker compose exec -T video-processor nvidia-smi
-docker compose exec -T video-processor python -c 'from web_app.encoding import get_gpu_capabilities; print(get_gpu_capabilities())'
-```
-
-若修改了绑定 IP 或端口，健康检查地址也同步修改；只绑定服务器内网 IP 时，不能使用 `127.0.0.1` 检查。
-
-应看到容器为 `healthy`，健康接口的 `version` 为 `1.3.8`、`revision` 与 `release.json` 一致；GPU 检测中 H.264 与 H.265 均可用。GPU 不可用且选择自动时可能回退 CPU，应根据检测原因检查驱动与透传。
-
-使用自生成画面做真实 NVENC 验证：
-
-```bash
-docker compose exec -T video-processor ffmpeg -hide_banner -v error -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -c:v h264_nvenc -preset p4 -f null -
-docker compose exec -T video-processor ffmpeg -hide_banner -v error -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -c:v hevc_nvenc -preset p4 -f null -
-```
-
-两条命令均正常退出才确认编码可用。不要仅依靠编码器列表判断。
-
-## 6. 内网访问与宝塔反向代理
-
-直接访问时，在服务器网络和宝塔安全设置中允许所需内网客户端连接 8899，浏览器打开 `http://Ubuntu服务器IP:8899`，输入 `.env` 设置的账号和密码。服务器 IP 使用 Ubuntu 的实际地址。
-
-可将 `VIDEO_PROCESSOR_BIND_IP` 改为服务器内网 IP，限制监听范围。Docker 发布端口可能绕过 UFW，不能仅根据宝塔或 UFW 的列表推断端口已经被阻止。[Docker 防火墙说明](https://docs.docker.com/engine/install/ubuntu/#firewall-limitations)
-
-若通过宝塔网站绑定域名并启用 HTTPS，先将 `.env` 的 `VIDEO_PROCESSOR_BIND_IP` 改为 `127.0.0.1`，重新运行同一个 `docker compose up` 命令。然后在宝塔的网站/反向代理界面设置目标为 `http://127.0.0.1:8899`。
-
-本应用使用 8 MiB 分块上传。Nginx 的代理 `location` 中可采用：
+若使用宝塔网站/反向代理和 HTTPS，映射宿主机 `127.0.0.1:8899`，反向代理目标设为 `http://127.0.0.1:8899`。当前网页是 8 MiB 分块上传，Nginx 代理配置可补充：
 
 ```nginx
 client_max_body_size 64m;
@@ -157,52 +171,37 @@ proxy_set_header X-Forwarded-Proto $scheme;
 proxy_set_header Authorization $http_authorization;
 ```
 
-保留宝塔生成的 `proxy_pass`，按现有配置补充指令，避免同一层级重复定义。不要缓存登录接口、`/api/` 或样片地址，避免复用已失效的预览。若直接调用普通上传接口发送整个视频，`client_max_body_size` 需按实际单文件大小调整；64m 适用于当前网页的分块上传。
+保留宝塔生成的 `proxy_pass`，避免同一层级重复定义指令。登录、`/api/` 和样片地址不配置缓存。64m 适用于网页分块上传；普通接口上传整文件需按实际视频大小调整。
 
-在另外一台电脑通过实际访问地址，验证选择视频 → 预估 → 查看抽中的最多 3 个样片 → 开始制作 → 下载。刷新、调整参数后样片应清理；正式制作应包含全部视频。
+### 资源统计与并发
 
-## 7. 资源统计与上线验收
+Ubuntu 原生 Docker 中，本项目 CPU/内存采集通常反映宿主机全局资源；GPU 编码器和显存反映所选物理显卡，包括其他程序。宝塔显示的容器占用属于不同统计范围。部署后与宿主机 `htop`、`free -h`、`nvidia-smi` 对照，采样和内存缓存算法会导致部分差异。
 
-Ubuntu 原生 Docker 中，当前 CPU 和内存采集通常反映宿主机全局状态；GPU 编码器与显存反映所选 RTX 3090 的硬件状态，包括其他程序。部署后与宿主机的 `htop`、`free -h`、`nvidia-smi` 对照，采样和内存缓存算法可能造成数值差异。
+自动并发从 1 路增长，新增任务前检查 CPU、内存、GPU 编码器、GPU 利用率和显存是否达到 80%，GPU 默认最多 8 路。80% 是停止增加任务的阈值，已运行任务仍可能超过此值。如果另设容器 CPU/内存配额，需要同时观察容器上限。
 
-宝塔 Docker 的容器占用属于另一种统计范围，不必与网页的全局负载相等。此编排没有 CPU/内存配额；以后增加配额时，还需单独检查容器是否达到上限。
+### 可选完整自检
 
-自动并发从 1 路增长，新增任务前检查 CPU、内存、GPU 编码器、GPU 利用率及显存是否达到 80%，默认最多 8 路。80% 是停止增加任务的阈值，已运行任务仍可能超过此值。
-
-完整自检应在任务空闲时执行，会制作短测试视频并清理它创建的任务；若开启通知，测试也可能发出通知：
+服务器空闲时，在宿主机的宝塔终端执行；将容器名、账号和端口改为实际值。自检会制作短测试视频并清理自己的测试任务，开启通知时可能发出测试通知：
 
 ```bash
 cd /www/server/docker/video-processor-web
 export VIDEO_PROCESSOR_AUTH_USER=admin
 read -r -s -p '验证用登录密码: ' VIDEO_PROCESSOR_AUTH_PASSWORD; echo
 export VIDEO_PROCESSOR_AUTH_PASSWORD
-python3 validate_docker.py --gpu --container "$(docker compose ps -q video-processor)" --url http://127.0.0.1:8899
+python3 validate_docker.py --gpu --container video-processor-web --url http://127.0.0.1:8899
 unset VIDEO_PROCESSOR_AUTH_PASSWORD
 ```
 
-账号、IP 和端口如有修改，以上命令也同步修改。自检覆盖 H.264/H.265/MKV、水印、音轨、下载、ZIP、断点续传、样片 Range、清理、同名文件及暂停恢复。
+编排创建的容器名可在宝塔容器列表复制。该脚本覆盖真实编码、水印、音轨、下载、ZIP、分块续传、样片 Range、清理、同名文件和暂停恢复。
 
-## 8. 更新、备份与回滚
+## 7. 后续更新、备份与回滚
 
-更新前停止上传，等待任务结束，在同一项目目录执行：
+在宝塔中等待当前任务完成后停止应用容器，备份**完整宿主机数据目录**和容器配置/环境变量；编排部署还备份 `.env` 与 `docker-compose.yml`。原视频和水印也在数据目录内，不要只备份数据库。备份存放在其他目录，并验证能读取。
 
-```bash
-cd /www/server/docker/video-processor-web
-stamp="$(date +%Y%m%d-%H%M%S)"
-sudo install -d -m 0700 /www/backup/video-processor-web
-docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q video-processor)" > "/www/backup/video-processor-web/$stamp-image.txt"
-docker compose stop
-sudo tar -czf "/www/backup/video-processor-web/$stamp-data.tgz" -C /www/server/docker/video-processor-web data .env docker-compose.yml
-sudo chmod 600 "/www/backup/video-processor-web/$stamp-data.tgz"
-sudo tar -tzf "/www/backup/video-processor-web/$stamp-data.tgz" > /dev/null
-```
+更新时先导入新镜像，保留旧镜像；记录旧标签，然后用新镜像重新创建应用容器，复用原端口、账号、环境变量和数据挂载。编排部署则更新同一项目的镜像标签后重新部署。修改后按第 6 节验收。
 
-任何备份步骤失败，先用 `docker compose start` 恢复原服务，再排查。自定义数据盘时，备份命令同步改为实际数据路径；不要只备份数据库，视频和水印也要保留。
+回滚时用记录的旧镜像标签重新创建容器，继续挂载原数据目录；如需恢复数据快照，先停止服务再恢复到新目录并调整挂载，保留原目录供核对。
 
-上传新包到另一临时目录，校验并加载新镜像；将新 `docker-compose.yml` 复制到固定项目目录，保留原 `.env`、项目名和数据目录，只把镜像标签、提交号更新为新包中的值。仍用 `--no-build --pull never` 启动并检查健康接口。
+**不要删除持久化数据目录，不要同时让两个应用副本访问同一目录。** 单纯删除或重建应用容器不会影响正确挂载的宿主机数据目录，但宝塔操作时不要同时选择删除数据。
 
-回滚时，在 `.env` 把 `VIDEO_PROCESSOR_IMAGE_TAG` 改回备份记录的旧标签，重新执行启动命令，复用现有数据。先保留旧镜像；健康接口的 revision 来自镜像，会随回滚恢复。若必须恢复数据快照，停止服务后恢复到新目录，修改数据挂载指向新目录，再启动；保留原目录供核对。
-
-不删除 `data`，不运行 `docker compose down -v`，不同时启动两个应用副本访问同一数据目录。应用必须保持一个容器、一个 Uvicorn worker。
-
-镜像验证可在本机完成，但 Ubuntu RTX 3090 的最终驱动、宝塔配置和真实吞吐量，需要按本文在目标服务器验收。
+本次已验证离线镜像导入、CPU/GPU 容器和网页完整流程。公司 Ubuntu RTX 3090 的驱动、宝塔实际版本和访问环境，仍需在服务器按第 6 节验收；服务器尚未由本次工作远程部署。
