@@ -62,7 +62,7 @@ docker compose -f compose.yaml -f compose.nvidia.yaml logs --tail=100
 ```
 
 访问 `http://服务器IP:8899`。页面应显示服务器 GPU 名称；选择自动时显示 GPU 的 CQ 和策略，
-并保留独立的 CPU 参数用于回退。推荐先以 CQ 26、均衡策略处理代表性视频，确认画质、体积及总耗时。
+并保留独立的 CPU 参数用于回退。CPU CRF 和 GPU CQ 均默认为 32，可先以默认参数处理代表性视频，确认画质、体积及总耗时。
 
 验证容器内 H.264 硬件编码：
 

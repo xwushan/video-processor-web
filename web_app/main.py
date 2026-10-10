@@ -85,7 +85,7 @@ AUTH_USER = os.getenv("VIDEO_PROCESSOR_AUTH_USER", "admin").strip() or "admin"
 AUTH_PASSWORD = os.getenv("VIDEO_PROCESSOR_AUTH_PASSWORD", "")
 AUTH_COOKIE_NAME = "video_processor_session"
 AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
-APP_VERSION = "1.3.7"
+APP_VERSION = "1.3.8"
 ESTIMATE_LEASE_SECONDS = 600
 APP_REVISION = os.getenv("VIDEO_PROCESSOR_REVISION", "unknown")
 
@@ -470,7 +470,7 @@ def build_job_settings(
     fixed_watermark_size: str,
     dynamic_watermark_size: str,
     encoder_device: str = DEFAULT_ENCODER_DEVICE,
-    gpu_quality: str = "26",
+    gpu_quality: str = "32",
     gpu_preset: str = "p4",
     gpu_concurrency: str = str(GPU_MAX_CONCURRENT),
 ) -> dict:
@@ -491,7 +491,7 @@ def build_job_settings(
         "format_type": format_type if format_type in {"h264", "h265", "mkv"} else "h264",
         "encoder_preset": safe_encoder_preset(encoder_preset),
         "encoder_device": encoder_device,
-        "gpu_quality": parse_int(gpu_quality, 26, 1, 51),
+        "gpu_quality": parse_int(gpu_quality, 32, 1, 51),
         "gpu_preset": gpu_preset if gpu_preset in {f"p{i}" for i in range(1, 8)} else "p4",
         # Accept legacy form fields, but all GPU jobs now use live resource scheduling.
         "gpu_concurrency": GPU_MAX_CONCURRENT,
@@ -1164,7 +1164,7 @@ def process_file(
             dynamic_watermark_width_ratio=settings.get("dynamic_watermark_size", 6.25) / 100,
             encoder_threads=ffmpeg_threads, filter_threads=filter_threads,
             encoder_preset=settings.get("encoder_preset", "veryfast"),
-            encoder_device=encoder_device, gpu_quality=settings.get("gpu_quality", 26),
+            encoder_device=encoder_device, gpu_quality=settings.get("gpu_quality", 32),
             gpu_preset=settings.get("gpu_preset", "p4"),
         )
     command = make_command()
@@ -2165,7 +2165,7 @@ async def start_size_estimate(
     interval: str = Form("60"), duration: str = Form("5"), crf: str = Form("32"),
     format_type: str = Form("h264"), encoder_preset: str = Form("veryfast"),
     fixed_watermark_size: str = Form("6.25"), dynamic_watermark_size: str = Form("6.25"),
-    encoder_device: str = Form(DEFAULT_ENCODER_DEVICE), gpu_quality: str = Form("26"),
+    encoder_device: str = Form(DEFAULT_ENCODER_DEVICE), gpu_quality: str = Form("32"),
     gpu_preset: str = Form("p4"),
     owner_id: str = Form(""),
 ) -> dict:
@@ -2290,7 +2290,7 @@ async def complete_resumable_upload(
     fixed_watermark_size: str = Form("6.25"),
     dynamic_watermark_size: str = Form("6.25"),
     encoder_device: str = Form(DEFAULT_ENCODER_DEVICE),
-    gpu_quality: str = Form("26"),
+    gpu_quality: str = Form("32"),
     gpu_preset: str = Form("p4"),
     gpu_concurrency: str = Form(str(GPU_MAX_CONCURRENT)),
 ) -> dict:
@@ -2381,7 +2381,7 @@ async def create_job(
     fixed_watermark_size: str = Form("6.25"),
     dynamic_watermark_size: str = Form("6.25"),
     encoder_device: str = Form(DEFAULT_ENCODER_DEVICE),
-    gpu_quality: str = Form("26"),
+    gpu_quality: str = Form("32"),
     gpu_preset: str = Form("p4"),
     gpu_concurrency: str = Form(str(GPU_MAX_CONCURRENT)),
 ) -> dict:

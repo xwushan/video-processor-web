@@ -275,12 +275,12 @@ def _get_format_config(format_type, encoder_preset=None):
 
 
 def _get_video_codec_args(format_type, quality, encoder_preset=None,
-                          encoder_device="cpu", gpu_quality=26, gpu_preset="p4"):
+                          encoder_device="cpu", gpu_quality=32, gpu_preset="p4"):
     """CPU CRF and NVENC CQ are intentionally independent quality controls."""
     common = "-pix_fmt yuv420p"
     if encoder_device == "nvidia":
         preset = gpu_preset if gpu_preset in {f"p{i}" for i in range(1, 8)} else "p4"
-        cq = _bounded_int(gpu_quality, 26, 1, 51)
+        cq = _bounded_int(gpu_quality, 32, 1, 51)
         codec = "hevc_nvenc" if format_type == "h265" else "h264_nvenc"
         tag = " -tag:v hvc1" if format_type == "h265" else ""
         return f'-c:v {codec} -gpu 0 -preset {preset} -tune hq -rc vbr -cq {cq} -b:v 0{tag} {common}'
@@ -314,7 +314,7 @@ def _dynamic_watermark_expressions(interval, hold_seconds, video_width, video_he
 
 
 def generate_ffmpeg_command(video_path, output_path, interval=60,
-                            watermark_duration_seconds=3, crf=30,
+                            watermark_duration_seconds=3, crf=32,
                             fixed_watermark_enabled=True, fixed_watermark_pos="top-right",
                             dynamic_watermark_enabled=True,
                             format_type="h264", watermark_opacity=1.0,
@@ -322,7 +322,7 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
                             fixed_watermark_width_ratio=None, dynamic_watermark_width_ratio=None,
                             encoder_threads=None, filter_threads=1,
                             encoder_preset=None, encoder_device="cpu",
-                            gpu_quality=26, gpu_preset="p4",
+                            gpu_quality=32, gpu_preset="p4",
                             sample_start=None, sample_duration=None):
     """
     生成带有水印的FFmpeg命令。
