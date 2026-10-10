@@ -1409,12 +1409,18 @@ async function initOrResumeUpload(signal) {
     saved = saved || JSON.parse(localStorage.getItem(uploadSessionStorageKey) || "null");
   } catch { /* Use the in-memory session if browser storage is unavailable. */ }
   if (saved?.fingerprint === fingerprint && saved?.id) {
-    const response = await fetch(`/api/uploads/${saved.id}`, { signal });
-    if (response.ok) return { fingerprint, session: await response.json() };
+    try {
+      const session = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${saved.id}`, { signal }, {
+        retries: 4, timeoutMs: 10000, fallback: "读取上传进度失败",
+      });
+      return { fingerprint, session };
+    } catch (error) {
+      if (![404, 409].includes(error.status)) throw error;
+    }
     try { localStorage.removeItem(uploadSessionStorageKey); } catch { /* Storage is optional. */ }
     uploadSessionMemory = null;
   }
-  const response = await fetch("/api/uploads/init", {
+  const session = await window.VideoProcessorNetwork.requestJson("/api/uploads/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
@@ -1425,8 +1431,7 @@ async function initOrResumeUpload(signal) {
         size: file.size,
       })),
     }),
-  });
-  const session = await readJsonResponse(response, "无法创建上传会话");
+  }, { fallback: "无法创建上传会话" });
   uploadSessionMemory = { id: session.id, fingerprint };
   try { localStorage.setItem(uploadSessionStorageKey, JSON.stringify(uploadSessionMemory)); } catch { /* Storage is optional. */ }
   return { fingerprint, session };
@@ -1447,13 +1452,19 @@ async function uploadSelectedFilesResumable(signal) {
       if (received.has(chunkIndex)) continue;
       const start = chunkIndex * chunkSize;
       const chunk = file.slice(start, Math.min(file.size, start + chunkSize));
-      const response = await fetch(
+      await window.VideoProcessorNetwork.requestJson(
         `/api/uploads/${session.id}/chunks/${fileIndex}/${chunkIndex}`,
         { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: chunk, signal },
+        {
+          retries: 4, timeoutMs: 120000, fallback: "上传分块失败，请检查网络后重试",
+          onRetry: (attempt, retries) => {
+            sizeEstimateHint.textContent = `上传连接中断，正在重试（${attempt}/${retries}）。已上传分块保留。`;
+          },
+        },
       );
-      await readJsonResponse(response, "上传分块失败，请检查网络后重试");
       uploadedBytes += chunk.size;
       setUploadProgress(totalBytes ? uploadedBytes / totalBytes * 100 : 100);
+      if (estimateBusy) sizeEstimateHint.textContent = "正在上传视频，上传完成后抽样预估…";
     }
   }
   completedUploadFingerprint = uploadFingerprint();
@@ -1465,8 +1476,8 @@ async function createJobWithProgress(data) {
   const sessionId = await uploadSelectedFilesResumable();
   data.delete("videos");
   data.delete("video_paths");
-  const response = await fetch(`/api/uploads/${sessionId}/complete`, { method: "POST", body: data });
-  const created = await readJsonResponse(response, "上传完成后创建任务失败");
+  const created = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${sessionId}/complete`,
+    { method: "POST", body: data }, { fallback: "上传完成后创建任务失败", timeoutMs: 120000 });
   if (activeEstimatePreview) closeVideoPreview();
   estimatePreviewState = null;
   estimateSignature = null;
@@ -1574,15 +1585,21 @@ estimateSizeBtn.addEventListener("click", async () => {
     estimateSessionId = await uploadSelectedFilesResumable(estimateUploadController.signal);
     if (estimateCancelRequested) return;
     uploadProgress.hidden = true;
-    const response = await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "POST", body: data });
-    let state = await readJsonResponse(response, "无法开始体积预估");
+    let state = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${estimateSessionId}/estimate`,
+      { method: "POST", body: data }, { fallback: "无法开始体积预估" });
     if (estimateCancelRequested && state.status === "running") {
       await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" });
     }
     while (["running", "canceling"].includes(state.status)) {
       sizeEstimateHint.textContent = `${state.message}（${state.progress || 0}%）`;
       await new Promise(resolve => setTimeout(resolve, 1000));
-      state = await readJsonResponse(await fetch(`/api/uploads/${estimateSessionId}/estimate`), "读取预估进度失败");
+      state = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${estimateSessionId}/estimate`,
+        { signal: estimateUploadController.signal }, {
+          retries: 4, timeoutMs: 10000, fallback: "读取预估进度失败",
+          onRetry: (attempt, retries) => {
+            sizeEstimateHint.textContent = `预估进度连接中断，正在重连（${attempt}/${retries}）…`;
+          },
+        });
     }
     terminal = true;
     renderSizeEstimate(state, estimateSessionId);
@@ -1593,7 +1610,9 @@ estimateSizeBtn.addEventListener("click", async () => {
     }));
   } catch (error) {
     sizeEstimateHint.textContent = estimateCancelRequested
-      ? "已取消上传，已传分块可在下次预估或制作时继续使用。" : error.message;
+      ? "已取消上传，已传分块可在下次预估或制作时继续使用。"
+      : error.networkFailure ? `${error.message}已上传分块保留，恢复连接后再次点击“预估成品”可继续。`
+        : error.message;
   } finally {
     // A lost polling connection must not leave an invisible trial running.
     if (estimateSessionId && !terminal) {
