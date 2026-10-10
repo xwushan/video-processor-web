@@ -40,6 +40,6 @@ FROM base AS runtime
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="video-processor-web" \
     org.opencontainers.image.source="https://github.com/xwushan/video-processor-web" \
-    org.opencontainers.image.version="1.3.2" \
+    org.opencontainers.image.version="1.3.3" \
     org.opencontainers.image.revision=$VCS_REF
 ENV VIDEO_PROCESSOR_REVISION=$VCS_REF

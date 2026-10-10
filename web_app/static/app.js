@@ -281,7 +281,7 @@ function updateEncoderPresetHint() {
   if (!encodingConfig) {
     encoderDeviceHint.textContent = "正在检测服务器编码设备…";
   } else if (usesGpu && available) {
-    encoderDeviceHint.textContent = `${encodingConfig.gpu.name} · GPU 编码，CPU 负责解码和水印。` +
+    encoderDeviceHint.textContent = "使用 NVIDIA GPU 编码，CPU 负责解码和水印。" +
       (encoderDevice.value === "auto" ? "GPU 不可用时使用独立的 CPU 参数重新制作。" : "GPU 编码不可用时任务会报错。");
   } else if (encoderDevice.value === "nvidia") {
     encoderDeviceHint.textContent = "当前格式的 GPU 编码不可用，请选择自动或 CPU，或检查显卡驱动及 Docker GPU 配置。";
