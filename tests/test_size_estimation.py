@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +21,203 @@ from test_job_regressions import FORM, TemporaryAppTestCase
 
 
 class EstimationApiTest(TemporaryAppTestCase):
+    def test_failed_sample_deletion_is_reported_and_retried_by_background_cleanup(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                base = f"/api/uploads/{session}/estimate"
+                owner = "a" * 32
+                await client.post(base, data={"encoder_device": "cpu", "owner_id": owner})
+                state = await self.finish(client, session)
+                with patch.object(main, "delete_path_safely", return_value=False):
+                    response = await client.post(base + "/cleanup", json={"owner_id": owner, "estimate_id": state["id"]})
+                self.assertEqual(response.status_code, 503)
+                self.assertTrue((await client.get(base)).json()["cleanup_pending"])
+                self.assertEqual((await client.get(f"{base}/{state['id']}/files/0/samples/0/video")).status_code, 404)
+                main.cleanup_estimate_previews()
+                self.assertFalse((main.RESUMABLE_UPLOAD_DIR / session / "estimate-previews").exists())
+                self.assertFalse((await client.get(base)).json()["cleanup_pending"])
+                self.assertEqual((main.RESUMABLE_UPLOAD_DIR / session / "files/lesson/clip.mp4").read_bytes(), b"source")
+        with patch.object(main, "estimate_file", side_effect=self.trial):
+            asyncio.run(scenario())
+
+    def test_legacy_upload_plan_preserves_chunks_and_reuses_new_selection(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                root = main.RESUMABLE_UPLOAD_DIR / session
+                manifest = main.load_upload_manifest(root)
+                manifest.pop("sample_indices")
+                manifest["files"][0].pop("duration_sec")
+                main.save_upload_manifest(root, manifest)
+                for duration in (60, 90):
+                    response = await client.put(f"/api/uploads/{session}/estimate-plan",
+                                                json={"files": [{"duration_sec": duration}]})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["sample_indices"], [0])
+                    self.assertEqual(response.json()["files"][0]["received_chunks"], [0])
+                    self.assertEqual(main.load_upload_manifest(root)["files"][0]["duration_sec"], duration)
+                self.assertEqual((root / "files/lesson/clip.mp4").read_bytes(), b"source")
+        asyncio.run(scenario())
+
+    def test_cleanup_and_lease_require_auth_and_valid_identity(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                base = f"/api/uploads/{session}/estimate"
+                await client.post(base, data={"encoder_device": "cpu", "owner_id": "a" * 32})
+                state = await self.finish(client, session)
+                for operation in ("cleanup", "lease"):
+                    self.assertEqual((await client.post(base + "/" + operation, json=[])).status_code, 400)
+                    with patch.object(main, "AUTH_PASSWORD", "test-password"):
+                        response = await client.post(base + "/" + operation,
+                            json={"owner_id": "a" * 32, "estimate_id": state["id"]})
+                        self.assertEqual(response.status_code, 401)
+                self.assertTrue((main.RESUMABLE_UPLOAD_DIR / session / "estimate-previews").exists())
+        with patch.object(main, "estimate_file", side_effect=self.trial):
+            asyncio.run(scenario())
+
+    def test_hundred_video_batch_uploads_and_encodes_only_three_until_production(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                files = [{"path": f"lesson/{i:03}.mp4", "size": 6, "duration_sec": (i + 1) * 60}
+                         for i in range(100)]
+                created = (await client.post("/api/uploads/init", json={"files": files})).json()
+                session = created["id"]
+                self.assertEqual(created["sample_indices"], [1, 20, 99])
+                for index in created["sample_indices"]:
+                    await client.put(f"/api/uploads/{session}/chunks/{index}/0", content=b"source")
+                owner = "a" * 32
+                await client.post(f"/api/uploads/{session}/estimate", data={"encoder_device": "cpu", "owner_id": owner})
+                state = await self.finish(client, session)
+                self.assertEqual(state["status"], "done", state)
+                self.assertEqual(state["sampled_count"], 3)
+                self.assertEqual(len(state["files"]), 100)
+                self.assertEqual(sum(bool(f["samples"]) for f in state["files"]), 3)
+                self.assertEqual(state["files"][0]["estimated_bytes"], 3200)
+                self.assertEqual(state["files"][98]["estimated_bytes"], 99 * 3200)
+                self.assertEqual(state["totals"]["original_bytes"], 600)
+                source_root = main.RESUMABLE_UPLOAD_DIR / session / "files"
+                self.assertEqual(len(list(source_root.rglob("*.mp4"))), 3)
+                self.assertEqual((await client.get(f"/api/uploads/{session}/estimate/{state['id']}/files/99/samples/0/video")).content,
+                                 b"processed-video")
+                plan = (await client.put(f"/api/uploads/{session}/estimate-plan", json={"files": files})).json()
+                self.assertEqual(plan["sample_indices"], [1, 20, 99])
+                self.assertEqual(sum(len(f["received_chunks"]) for f in plan["files"]), 3)
+                # Starting production never queues a partial batch and clears samples first.
+                response = await client.post(f"/api/uploads/{session}/complete", data={"encoder_device": "cpu"})
+                self.assertEqual(response.status_code, 409)
+                self.assertIsNone(main.current_job()["job"])
+                self.assertFalse((source_root.parent / "estimate-previews").exists())
+                for index in range(100):
+                    if index not in plan["sample_indices"]:
+                        await client.put(f"/api/uploads/{session}/chunks/{index}/0", content=b"source")
+                response = await client.post(f"/api/uploads/{session}/complete", data={"encoder_device": "cpu"})
+                self.assertEqual(response.status_code, 200, response.text)
+                job_files = main.get_job_files(response.json()["id"])
+                self.assertEqual(len(job_files), 100)
+                self.assertTrue(all(Path(f["input_path"]).read_bytes() == b"source" for f in job_files))
+        with patch.object(main.random.SystemRandom, "sample", return_value=[1, 20, 99]), \
+                patch.object(main, "estimate_file", side_effect=self.trial) as trial:
+            asyncio.run(scenario())
+        self.assertEqual(trial.call_count, 3)
+
+    def test_cleanup_removes_samples_preserves_source_and_old_owner_cannot_clear_new_trial(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                base = f"/api/uploads/{session}/estimate"
+                old = None
+                for owner in ("a" * 32, "b" * 32):
+                    await client.post(base, data={"encoder_device": "cpu", "owner_id": owner})
+                    state = await self.finish(client, session)
+                    root = main.RESUMABLE_UPLOAD_DIR / session
+                    self.assertTrue((root / "estimate-previews" / state["id"]).exists())
+                    if old:
+                        response = await client.post(base + "/cleanup", json=old)
+                        self.assertFalse(response.json()["released"])
+                        self.assertTrue((root / "estimate-previews" / state["id"]).exists())
+                    old = {"owner_id": owner, "estimate_id": state["id"]}
+                    self.assertEqual((await client.post(base + "/cleanup", json=old)).status_code, 200)
+                    self.assertFalse((root / "estimate-previews").exists())
+                    self.assertEqual((root / "files/lesson/clip.mp4").read_bytes(), b"source")
+                    self.assertEqual((await client.get(f"{base}/{state['id']}/files/0/samples/0/video")).status_code, 404)
+        with patch.object(main, "estimate_file", side_effect=self.trial) as trial:
+            asyncio.run(scenario())
+        self.assertEqual(trial.call_count, 2)
+
+    def test_lease_expiry_and_restart_clean_orphans_without_deleting_originals(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                base = f"/api/uploads/{session}/estimate"
+                owner = "a" * 32
+                await client.post(base, data={"encoder_device": "cpu", "owner_id": owner})
+                state = await self.finish(client, session)
+                directory = main.RESUMABLE_UPLOAD_DIR / session
+                state["lease_updated_at"] = time.time() - main.ESTIMATE_LEASE_SECONDS - 1
+                # Direct write to simulate elapsed time (worker writes preserve newer heartbeats).
+                (directory / "estimate.json").write_text(json.dumps(state), encoding="utf-8")
+                main.cleanup_estimate_previews()
+                self.assertEqual((await client.get(base)).json()["status"], "expired")
+                self.assertFalse((directory / "estimate-previews").exists())
+                self.assertEqual((await client.post(base + "/lease", json={"owner_id": owner, "estimate_id": state["id"]})).status_code, 409)
+                await client.post(base, data={"encoder_device": "cpu", "owner_id": owner})
+                state = await self.finish(client, session)
+                (directory / "estimate-work-orphan").mkdir()
+                main.cleanup_estimate_previews(restarting=True)
+                self.assertFalse((directory / "estimate-previews").exists())
+                self.assertFalse((directory / "estimate-work-orphan").exists())
+                self.assertEqual((directory / "files/lesson/clip.mp4").read_bytes(), b"source")
+        with patch.object(main, "estimate_file", side_effect=self.trial):
+            asyncio.run(scenario())
+
+    def test_heartbeat_survives_worker_write_and_old_snapshot_does_not_renew(self):
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                base = f"/api/uploads/{session}/estimate"
+                owner = "a" * 32
+                await client.post(base, data={"encoder_device": "cpu", "owner_id": owner})
+                state = await self.finish(client, session)
+                original_lease = state["lease_updated_at"]
+                with patch.object(main.time, "time", return_value=state["lease_updated_at"] + 100):
+                    response = await client.post(base + "/lease", json={"owner_id": owner, "estimate_id": state["id"]})
+                self.assertEqual(response.status_code, 200)
+                main.write_estimate_state(main.RESUMABLE_UPLOAD_DIR / session, state)
+                renewed = (await client.get(base)).json()
+                self.assertEqual(renewed["lease_updated_at"], original_lease + 100)
+                response = await client.post(base + "/lease", json={"owner_id": owner, "estimate_id": "b" * 32})
+                self.assertEqual(response.status_code, 409)
+        with patch.object(main, "estimate_file", side_effect=self.trial):
+            asyncio.run(scenario())
+
+    def test_scoped_cleanup_cancels_worker_even_if_last_encoder_ignores_cancel(self):
+        started, finish_encoder = threading.Event(), threading.Event()
+        def trial(source, work, settings, device, *_args):
+            started.set()
+            if not finish_encoder.wait(5):
+                raise TimeoutError("Test did not release the last encoder")
+            return self.trial(source, work, settings, device)
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+                session = await self.upload(client)
+                base = f"/api/uploads/{session}/estimate"
+                owner = "a" * 32
+                await client.post(base, data={"encoder_device": "cpu", "owner_id": owner})
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                    await client.post(base + "/cleanup", json={"owner_id": owner})
+                finally:
+                    finish_encoder.set()
+                state = await self.finish(client, session)
+                self.assertEqual(state["status"], "canceled")
+                self.assertFalse((main.RESUMABLE_UPLOAD_DIR / session / "estimate-previews").exists())
+                self.assertNotIn(session, main.completing_upload_sessions)
+                self.assertFalse(main.encoding_work_lock.locked())
+        with patch.object(main, "estimate_file", side_effect=trial):
+            asyncio.run(scenario())
+
     async def upload(self, client):
         session = (await client.post("/api/uploads/init", json={"files": [
             {"path": "lesson/clip.mp4", "size": 6}]})).json()["id"]
@@ -239,6 +437,20 @@ class EstimationApiTest(TemporaryAppTestCase):
 
 
 class MediaValidationTest(unittest.TestCase):
+    def test_projection_marks_unknown_duration_and_uses_wider_reference_range(self):
+        measured = {0: {"path": "sample.mp4", "original_bytes": 1000, "duration_sec": 10,
+                       "estimated_bytes": 100, "min_bytes": 90, "max_bytes": 110, "sampled": True}}
+        files = [{"path": "sample.mp4", "size": 1000}, {"path": "long.mp4", "size": 3000, "duration_sec": 30},
+                 {"path": "unknown.mp4", "size": 2000, "duration_sec": "NaN"}]
+        results = size_estimation.project_batch(files, measured)
+        self.assertEqual(results[1]["estimated_bytes"], 300)
+        self.assertEqual(results[2]["estimated_bytes"], 200)
+        self.assertIsNone(results[2]["duration_sec"])
+        self.assertEqual(results[2]["estimate_method"], "size_ratio")
+        self.assertFalse(results[1]["sampled"])
+        self.assertLessEqual(results[1]["min_bytes"], 180)
+        self.assertGreaterEqual(results[1]["max_bytes"], 480)
+
     def test_cancel_during_metadata_probe_does_not_start_an_encoder(self):
         canceled = threading.Event()
         canceled.set()

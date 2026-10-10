@@ -6,6 +6,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import shlex
 import signal
@@ -48,7 +49,9 @@ from web_app.encoding import (  # noqa: E402
     DEFAULT_ENCODER_DEVICE, GPU_MAX_CONCURRENT, GPU_CPU_THREADS,
     get_gpu_capabilities, get_gpu_metrics, select_encoder, is_gpu_error,
 )
-from web_app.size_estimation import EstimateCanceled, estimate_file  # noqa: E402
+from web_app.size_estimation import (  # noqa: E402
+    BATCH_SAMPLE_LIMIT, EstimateCanceled, estimate_file, optional_duration, project_batch,
+)
 
 
 APP_ROOT = Path(os.getenv("VIDEO_PROCESSOR_ROOT", "/data/video-processor"))
@@ -82,7 +85,8 @@ AUTH_USER = os.getenv("VIDEO_PROCESSOR_AUTH_USER", "admin").strip() or "admin"
 AUTH_PASSWORD = os.getenv("VIDEO_PROCESSOR_AUTH_PASSWORD", "")
 AUTH_COOKIE_NAME = "video_processor_session"
 AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
+ESTIMATE_LEASE_SECONDS = 600
 APP_REVISION = os.getenv("VIDEO_PROCESSOR_REVISION", "unknown")
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -93,11 +97,13 @@ TEMPLATE_PATH = THIS_DIR / "templates" / "index.html"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    cleanup_estimate_previews(restarting=True)
     cleanup_expired_files()
     get_gpu_capabilities()
     ensure_worker()
     recover_unfinished_jobs()
     threading.Thread(target=cleanup_worker, daemon=True).start()
+    threading.Thread(target=estimate_cleanup_worker, daemon=True).start()
     yield
     with upload_sessions_lock:
         for event in estimation_tasks.values():
@@ -1668,6 +1674,7 @@ def upload_session_payload(session_id: str, manifest: dict) -> dict:
     return {
         "id": session_id,
         "chunk_size": UPLOAD_CHUNK_SIZE,
+        "sample_indices": manifest.get("sample_indices", []),
         "files": [
             {
                 "path": item["path"],
@@ -1717,14 +1724,44 @@ async def init_resumable_upload(request: Request) -> dict:
             "size": size,
             "chunk_count": math.ceil(size / UPLOAD_CHUNK_SIZE),
             "received_chunks": [],
+            "duration_sec": optional_duration(item.get("duration_sec")),
         })
     ensure_disk_headroom(total_size)
     session_id = uuid.uuid4().hex
     session_dir = RESUMABLE_UPLOAD_DIR / session_id
     (session_dir / "files").mkdir(parents=True, exist_ok=False)
-    manifest = {"created_at": time.time(), "updated_at": time.time(), "files": files}
+    manifest = {"created_at": time.time(), "updated_at": time.time(), "files": files,
+                "sample_indices": sorted(random.SystemRandom().sample(
+                    range(len(files)), min(BATCH_SAMPLE_LIMIT, len(files))))}
     save_upload_manifest(session_dir, manifest)
     return upload_session_payload(session_id, manifest)
+
+
+@app.put("/api/uploads/{session_id}/estimate-plan")
+async def plan_size_estimate(session_id: str, request: Request) -> dict:
+    """Choose at most three files before uploading; reuse that choice when tuning."""
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="视频时长信息格式无效") from exc
+    files = payload.get("files") if isinstance(payload, dict) else None
+    session_dir = upload_session_path(session_id)
+    with upload_sessions_lock:
+        if session_id in completing_upload_sessions:
+            raise HTTPException(status_code=409, detail="请等待当前预估完成")
+        manifest = load_upload_manifest(session_dir)
+        if not isinstance(files, list) or len(files) != len(manifest["files"]):
+            raise HTTPException(status_code=400, detail="视频列表与上传会话不一致")
+        for original, metadata in zip(manifest["files"], files):
+            if not isinstance(metadata, dict):
+                raise HTTPException(status_code=400, detail="视频时长信息格式无效")
+            original["duration_sec"] = optional_duration(metadata.get("duration_sec"))
+        # Upgrade resumable sessions created by older releases without discarding chunks.
+        if not manifest.get("sample_indices"):
+            manifest["sample_indices"] = sorted(random.SystemRandom().sample(
+                range(len(files)), min(BATCH_SAMPLE_LIMIT, len(files))))
+        save_upload_manifest(session_dir, manifest)
+        return upload_session_payload(session_id, manifest)
 
 
 @app.get("/api/uploads/{session_id}")
@@ -1876,6 +1913,15 @@ def read_estimate_state(session_dir: Path) -> dict:
 
 def write_estimate_state(session_dir: Path, state: dict) -> None:
     target = session_dir / "estimate.json"
+    # The worker owns its own state object. Preserve heartbeats written by HTTP
+    # requests rather than overwriting their lease with the worker's old copy.
+    try:
+        current = read_estimate_state(session_dir)
+        if current.get("id") == state.get("id"):
+            state["lease_updated_at"] = max(state.get("lease_updated_at", 0),
+                                            current.get("lease_updated_at", 0))
+    except HTTPException:
+        pass
     temporary = target.with_suffix(".json.part")
     temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     temporary.replace(target)
@@ -1883,23 +1929,76 @@ def write_estimate_state(session_dir: Path, state: dict) -> None:
     os.utime(session_dir, None)
 
 
+def clear_estimate_previews(session_id, session_dir, state, status="cleared"):
+    """Caller holds upload_sessions_lock. Never remove uploaded source videos."""
+    event = estimation_tasks.get(session_id)
+    if event:
+        event.set()
+        state.update(status="canceling", message="正在停止试编码并清理临时样片…")
+    else:
+        preview_root = session_dir / "estimate-previews"
+        delete_path_safely(preview_root, session_dir)
+        state["cleanup_pending"] = preview_root.exists()
+        state.update(status=status, message="临时样片已清理，请重新预估后查看画质")
+        for item in state.get("files", []):
+            item["samples"] = []
+    write_estimate_state(session_dir, state)
+    if state.get("cleanup_pending") and not event:
+        raise HTTPException(status_code=503, detail="临时样片尚未清理成功，请稍后重试；服务器会继续清理")
+    return state
+
+
+def cleanup_estimate_previews(restarting=False):
+    if not RESUMABLE_UPLOAD_DIR.exists():
+        return
+    for session_dir in RESUMABLE_UPLOAD_DIR.iterdir():
+        if not session_dir.is_dir():
+            continue
+        with upload_sessions_lock:
+            try:
+                state = read_estimate_state(session_dir)
+                expired = time.time() - state.get("lease_updated_at", 0) > ESTIMATE_LEASE_SECONDS
+                if (state.get("cleanup_pending") or ((restarting or expired)
+                        and state.get("status") not in {"cleared", "expired", "canceled"})):
+                    clear_estimate_previews(session_dir.name, session_dir, state, "expired")
+            except (HTTPException, OSError):
+                pass
+            if session_dir.name not in completing_upload_sessions:
+                if restarting:
+                    delete_path_safely(session_dir / "estimate-previews", session_dir)
+                for work_dir in session_dir.glob("estimate-work-*"):
+                    delete_path_safely(work_dir, session_dir)
+
+
+def estimate_cleanup_worker():
+    while True:
+        try:
+            cleanup_estimate_previews()
+        except Exception as exc:
+            print(f"Trial cleanup failed: {exc}", file=sys.stderr)
+        time.sleep(30)
+
+
 def run_size_estimate(session_id, session_dir, manifest, settings, device, threads,
                       work_dir, state, canceled):
     terminal = "done"
     preview_root = session_dir / "estimate-previews" / state["id"]
     try:
-        for index, item in enumerate(manifest["files"]):
+        measured = {}
+        for position, index in enumerate(state["sample_indices"]):
+            item = manifest["files"][index]
             if canceled.is_set():
                 raise EstimateCanceled()
             source = session_dir / "files" / item["path"]
             def on_sample(sample_index, count):
                 if canceled.is_set():
                     raise EstimateCanceled()
-                state["progress"] = round((index + sample_index / count) / len(manifest["files"]) * 100)
-                state["message"] = f"{item['path']}：试编码 {sample_index + 1}/{count}"
+                state["progress"] = round((position + sample_index / count) / len(state["sample_indices"]) * 100)
+                state["message"] = (f"抽样视频 {position + 1}/{len(state['sample_indices'])} · "
+                                    f"{item['path']}：试编码 {sample_index + 1}/{count}")
                 with upload_sessions_lock:
                     write_estimate_state(session_dir, state)
-            result = {"path": item["path"], "original_bytes": item["size"]}
+            result = {"path": item["path"], "original_bytes": item["size"], "sampled": True}
             file_work = work_dir / f"file-{index}"
             try:
                 ensure_disk_headroom()
@@ -1915,22 +2014,29 @@ def run_size_estimate(session_id, session_dir, manifest, settings, device, threa
                     result.update(estimate_file(source, file_work, settings, "cpu", recommend_ffmpeg_threads(0),
                                                 canceled, terminate_process, on_sample, True))
                     result["fallback_reason"] = "GPU 试编码失败，已按 CPU 参数预估"
+                if canceled.is_set():
+                    raise EstimateCanceled()
                 preview_root.mkdir(parents=True, exist_ok=True)
                 file_work.replace(preview_root / f"file-{index}")
             except EstimateCanceled:
                 raise
             except Exception as exc:
                 result["error"] = str(exc)[-400:] or "预估失败"
-            state["files"].append(result)
-        good = [item for item in state["files"] if "estimated_bytes" in item and not item.get("error")]
-        state["failed_count"] = len(state["files"]) - len(good)
+            state["files"][index] = result
+            measured[index] = result
+        good = [item for item in measured.values() if "estimated_bytes" in item and not item.get("error")]
+        state["failed_count"] = len(measured) - len(good)
         if state["failed_count"]:
             terminal = "error"
             state["message"] = "部分视频预估失败，请查看列表；未计算整批大小"
         else:
-            state["totals"] = {key: sum(item[key] for item in good)
+            state["files"] = project_batch(manifest["files"], measured)
+            state["totals"] = {key: sum(item[key] for item in state["files"])
                                for key in ("original_bytes", "estimated_bytes", "min_bytes", "max_bytes")}
-            state["message"] = "预估完成，实际大小可能超出参考范围"
+            state["message"] = (f"预估完成：{len(manifest['files'])} 个视频中实际试编码 "
+                                f"{len(good)} 个，其余按抽样推算。样片仅临时保留；实际大小可能超出参考范围。"
+                                if len(good) < len(manifest["files"]) else
+                                "预估完成，样片仅临时保留；实际大小可能超出参考范围。")
         state["progress"] = 100
     except EstimateCanceled:
         terminal = "canceled"
@@ -1946,6 +2052,15 @@ def run_size_estimate(session_id, session_dir, manifest, settings, device, threa
             delete_path_safely(work_dir, session_dir)
         finally:
             with upload_sessions_lock:
+                # Cancellation can arrive after the final clip finished.
+                if canceled.is_set():
+                    terminal = "canceled"
+                    state["message"] = "已取消预估，临时样片已清理，已上传的原视频可继续使用"
+                if terminal in {"canceled", "error"}:
+                    delete_path_safely(preview_root, session_dir)
+                    state["cleanup_pending"] = preview_root.exists()
+                    for item in state["files"]:
+                        item["samples"] = []
                 estimation_tasks.pop(session_id, None)
                 completing_upload_sessions.discard(session_id)
                 encoding_work_lock.release()
@@ -1954,12 +2069,15 @@ def run_size_estimate(session_id, session_dir, manifest, settings, device, threa
 
 
 @app.get("/api/uploads/{session_id}/estimate")
-def size_estimate_status(session_id: str) -> dict:
+def size_estimate_status(session_id: str, owner_id: str = "") -> dict:
     session_dir = upload_session_path(session_id)
     with upload_sessions_lock:
         state = read_estimate_state(session_dir)
         if state["status"] in {"running", "canceling"} and session_id not in estimation_tasks:
             state.update(status="error", message="服务已重启，请重新预估")
+        if owner_id and owner_id == state.get("owner_id") and state["status"] in {"running", "done"}:
+            state["lease_updated_at"] = time.time()
+            write_estimate_state(session_dir, state)
         return state
 
 
@@ -1967,14 +2085,45 @@ def size_estimate_status(session_id: str) -> dict:
 def cancel_size_estimate(session_id: str) -> dict:
     session_dir = upload_session_path(session_id)
     with upload_sessions_lock:
-        event = estimation_tasks.get(session_id)
-        if event:
-            event.set()
         state = read_estimate_state(session_dir)
-        if event:
-            state.update(status="canceling", message="正在停止试编码…")
-            write_estimate_state(session_dir, state)
-        return state
+        return clear_estimate_previews(session_id, session_dir, state)
+
+
+async def scoped_estimate_state(session_id: str, request: Request):
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="样片清理信息无效") from exc
+    owner_id = payload.get("owner_id") if isinstance(payload, dict) else None
+    if not isinstance(owner_id, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_id):
+        raise HTTPException(status_code=400, detail="预估标识无效")
+    return upload_session_path(session_id), payload
+
+
+@app.post("/api/uploads/{session_id}/estimate/cleanup")
+async def release_estimate_previews(session_id: str, request: Request):
+    session_dir, payload = await scoped_estimate_state(session_id, request)
+    with upload_sessions_lock:
+        state = read_estimate_state(session_dir)
+        # A delayed beacon from an old page must not remove a newer trial.
+        if state.get("owner_id") != payload["owner_id"] or (payload.get("estimate_id")
+                and state.get("id") != payload["estimate_id"]):
+            return {"released": False}
+        clear_estimate_previews(session_id, session_dir, state)
+        return {"released": True}
+
+
+@app.post("/api/uploads/{session_id}/estimate/lease")
+async def renew_estimate_lease(session_id: str, request: Request):
+    session_dir, payload = await scoped_estimate_state(session_id, request)
+    with upload_sessions_lock:
+        state = read_estimate_state(session_dir)
+        if (state.get("owner_id") != payload["owner_id"] or state.get("id") != payload.get("estimate_id")
+                or state.get("status") not in {"done", "running"}):
+            raise HTTPException(status_code=409, detail="临时样片已失效，请重新预估")
+        state["lease_updated_at"] = time.time()
+        write_estimate_state(session_dir, state)
+        return {"ok": True}
 
 
 def estimate_previews_exist(session_dir, state):
@@ -1982,7 +2131,7 @@ def estimate_previews_exist(session_dir, state):
     return bool(state.get("files")) and all(
         item.get("samples") and all((root / f"file-{index}" / f"{kind}-{sample}.{ext}").is_file()
             for sample in range(len(item["samples"])) for kind, ext in (("preview", "mp4"), ("thumbnail", "jpg")))
-        for index, item in enumerate(state["files"]))
+        for index, item in enumerate(state["files"]) if item.get("sampled", True))
 
 
 @app.get("/api/uploads/{session_id}/estimate/{estimate_id}/files/{file_index}/samples/{sample_index}/{kind}")
@@ -2018,7 +2167,10 @@ async def start_size_estimate(
     fixed_watermark_size: str = Form("6.25"), dynamic_watermark_size: str = Form("6.25"),
     encoder_device: str = Form(DEFAULT_ENCODER_DEVICE), gpu_quality: str = Form("26"),
     gpu_preset: str = Form("p4"),
+    owner_id: str = Form(""),
 ) -> dict:
+    if owner_id and not re.fullmatch(r"[0-9a-f]{32}", owner_id):
+        raise HTTPException(status_code=400, detail="预估标识无效")
     session_dir = upload_session_path(session_id)
     settings = build_job_settings(
         fixed_watermark_enabled, dynamic_watermark_enabled, fixed_watermark_pos,
@@ -2039,7 +2191,12 @@ async def start_size_estimate(
                 if session_id in completing_upload_sessions:
                     raise HTTPException(status_code=409, detail="该上传正在预估或创建任务，请稍后")
                 manifest = load_upload_manifest(session_dir)
-                for item in manifest["files"]:
+                if not manifest.get("sample_indices"):
+                    manifest["sample_indices"] = sorted(random.SystemRandom().sample(
+                        range(len(manifest["files"])), min(BATCH_SAMPLE_LIMIT, len(manifest["files"]))))
+                    save_upload_manifest(session_dir, manifest)
+                for index in manifest["sample_indices"]:
+                    item = manifest["files"][index]
                     source = session_dir / "files" / item["path"]
                     if (not is_safe_child(source, session_dir / "files")
                             or len(item.get("received_chunks", [])) != item["chunk_count"]
@@ -2062,10 +2219,11 @@ async def start_size_estimate(
             with path.open("rb") as image:
                 hashes[kind] = hashlib.file_digest(image, "sha256").hexdigest()
         cache_key = hashlib.sha256(json.dumps({
-            "schema": 2, "version": APP_VERSION,
+            "schema": 3, "version": APP_VERSION, "sample_indices": manifest["sample_indices"],
             "settings": {k: v for k, v in settings.items() if not k.endswith("_path")},
             "watermarks": hashes, "device": device, "threads": threads,
-            "files": [{"path": f["path"], "size": f["size"]} for f in manifest["files"]],
+            "files": [{"path": f["path"], "size": f["size"], "duration_sec": f.get("duration_sec")}
+                      for f in manifest["files"]],
         }, sort_keys=True).encode()).hexdigest()
         with upload_sessions_lock:
             try:
@@ -2073,11 +2231,25 @@ async def start_size_estimate(
             except HTTPException:
                 cached = {}
             if (cached.get("status") == "done" and cached.get("cache_key") == cache_key
-                    and all(item.get("encoder_device") == device for item in cached.get("files", []))
+                    and cached.get("owner_id", "") == owner_id
+                    and all(item.get("encoder_device") == device for item in cached.get("files", []) if item.get("sampled", True))
                     and estimate_previews_exist(session_dir, cached)):
+                cached["lease_updated_at"] = time.time()
+                write_estimate_state(session_dir, cached)
                 return cached
+            preview_root = session_dir / "estimate-previews"
+            delete_path_safely(preview_root, session_dir)
+            if preview_root.exists():
+                raise HTTPException(status_code=503, detail="上次临时样片尚未清理，请稍后再预估")
             state = {"id": uuid.uuid4().hex, "status": "running", "progress": 0,
-                     "message": "正在准备试编码…", "files": [], "cache_key": cache_key,
+                     "message": "正在准备试编码…", "cache_key": cache_key,
+                     "owner_id": owner_id, "lease_updated_at": time.time(),
+                     "sample_indices": manifest["sample_indices"], "sampled_count": len(manifest["sample_indices"]),
+                     "total_count": len(manifest["files"]),
+                     "files": [{"path": f["path"], "original_bytes": f["size"],
+                                "duration_sec": f.get("duration_sec"), "samples": [],
+                                "sampled": i in manifest["sample_indices"], "error": "尚未完成抽样推算"}
+                               for i, f in enumerate(manifest["files"])],
                      "encoder_device": device, "fallback_reason": reason}
             canceled = threading.Event()
             write_estimate_state(session_dir, state)
@@ -2085,7 +2257,6 @@ async def start_size_estimate(
             # Return a separate object: the worker immediately mutates its state.
             response = json.loads(json.dumps(state))
         # A new snapshot invalidates old samples; uploaded sources remain reusable.
-        delete_path_safely(session_dir / "estimate-previews", session_dir)
         thread = threading.Thread(target=run_size_estimate, args=(session_id, session_dir,
             manifest, settings, device, threads, work_dir, state, canceled), daemon=True,
             name="video-size-estimate")
@@ -2134,6 +2305,11 @@ async def complete_resumable_upload(
         if session_id in completing_upload_sessions:
             raise HTTPException(status_code=409, detail="该上传正在预估或创建任务，请稍后")
         manifest = load_upload_manifest(session_dir)
+        try:
+            clear_estimate_previews(session_id, session_dir, read_estimate_state(session_dir))
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
         incomplete = [
             item["path"]
             for item in manifest["files"]

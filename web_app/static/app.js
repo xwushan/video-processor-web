@@ -110,6 +110,9 @@ window.fetch = async (input, init = {}) => {
 
 let selectedFiles = [];
 let selectedVideoUrls = [];
+const videoMetadata = new WeakMap();
+const videoMetadataPromises = new WeakMap();
+let selectedRenderVersion = 0;
 let fixedWatermarkUrl = "/assets/rt.png";
 let dynamicWatermarkUrl = "/assets/dt.png";
 let previewVideoMeta = null;
@@ -118,11 +121,16 @@ let currentJobId = localStorage.getItem("currentJobId");
 let controlsLocked = false;
 let jobControlsLocked = false;
 let estimateBusy = false;
+let productionBusy = false;
 let estimateSignature = null;
+let estimateInvalidated = false;
 let estimateUploadController = null;
 let estimateSessionId = null;
 let estimateCancelRequested = false;
 let estimatePreviewState = null;
+let temporaryEstimate = null;
+let estimateLeaseTimer = null;
+let estimateCleanupPromise = Promise.resolve();
 let activeEstimatePreview = null;
 let uploadSessionMemory = null;
 let completedUploadFingerprint = null;
@@ -514,6 +522,17 @@ videoPreviewPlayer.addEventListener("error", () => {
 
 function showPage(name) {
   const records = name === "records";
+  if (records && temporaryEstimate) {
+    estimateInvalidated = true;
+    if (estimateBusy) {
+      estimateCancelRequested = true;
+      estimateUploadController?.abort();
+    }
+    void releaseTemporaryEstimate();
+    clearSampleButtons();
+    sizeEstimateHint.textContent = "离开处理页面时已清理临时样片，请重新预估。";
+    updateProductionAvailability();
+  }
   processPage.hidden = records;
   recordsPage.hidden = !records;
   processPage.classList.toggle("active", !records);
@@ -525,13 +544,13 @@ function showPage(name) {
 
 function setControlsLocked(locked) {
   jobControlsLocked = locked;
-  locked = locked || estimateBusy;
+  locked = locked || estimateBusy || productionBusy;
   controlsLocked = locked;
   form.classList.toggle("is-locked", locked);
   form.classList.toggle("is-estimating", estimateBusy);
   // Keep pause/resume/cancel available to assistive technology. Locked fields
   // are protected by the capture guard, rather than disabling the whole form.
-  form.setAttribute("aria-busy", estimateBusy ? "true" : "false");
+  form.setAttribute("aria-busy", estimateBusy || productionBusy ? "true" : "false");
   const banner = document.querySelector("#lockBanner");
   banner.querySelector("strong").textContent = estimateBusy ? "正在预估，参数已锁定" : "制作中，参数已锁定";
   banner.querySelector("span").textContent = estimateBusy
@@ -547,7 +566,7 @@ function setControlsLocked(locked) {
 
 function setProcessingVisible(visible) {
   const wasVisible = form.classList.contains("is-processing");
-  const show = visible && !estimateBusy;
+  const show = visible && !estimateBusy && !productionBusy;
   form.classList.toggle("is-processing", show);
   if (show && !wasVisible && processPage.classList.contains("active")) {
     document.getElementById("currentProgressTitle").focus({ preventScroll: true });
@@ -757,27 +776,49 @@ function revokeVideoUrls() {
   selectedVideoUrls = [];
 }
 
-function readVideoMeta(file) {
-  return new Promise((resolve) => {
+function getVideoMetadata(file) {
+  if (videoMetadata.has(file)) return Promise.resolve(videoMetadata.get(file));
+  if (videoMetadataPromises.has(file)) return videoMetadataPromises.get(file);
+  const pending = new Promise(resolve => {
     const url = URL.createObjectURL(file);
-    selectedVideoUrls.push(url);
     const video = document.createElement("video");
     video.preload = "metadata";
     video.muted = true;
-    video.onloadedmetadata = () => {
-      resolve({
-        url,
+    let settled = false;
+    const finish = meta => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute("src");
+      video.load();
+      URL.revokeObjectURL(url);
+      videoMetadata.set(file, meta);
+      resolve(meta);
+    };
+    const timer = setTimeout(() => finish({ width: 0, height: 0, duration: NaN }), 10000);
+    video.onloadedmetadata = () => finish({
         width: video.videoWidth || 0,
         height: video.videoHeight || 0,
         duration: video.duration
       });
-    };
-    video.onerror = () => resolve({ url, width: 0, height: 0, duration: NaN });
+    video.onerror = () => finish({ width: 0, height: 0, duration: NaN });
     video.src = url;
   });
+  videoMetadataPromises.set(file, pending);
+  return pending;
+}
+
+async function readVideoMeta(file) {
+  const url = URL.createObjectURL(file);
+  selectedVideoUrls.push(url);
+  return { ...await getVideoMetadata(file), url };
 }
 
 async function renderSelectedVideos() {
+  const generation = ++selectedRenderVersion;
+  const files = [...selectedFiles];
   invalidateSizeEstimate();
   revokeVideoUrls();
   selectedVideosEl.classList.toggle("empty", selectedFiles.length === 0);
@@ -804,14 +845,15 @@ async function renderSelectedVideos() {
     return;
   }
 
-  const total = selectedFiles.length;
+  const total = files.length;
   selectedVideosEl.innerHTML = `<div class="video-loading">正在分析视频信息... <span class="loading-progress">0 / ${total}</span></div>`;
 
   const items = [];
   for (let index = 0; index < total; index += 1) {
-    const file = selectedFiles[index];
+    const file = files[index];
     const displayPath = relativePathFor(file);
     const meta = await readVideoMeta(file);
+    if (generation !== selectedRenderVersion) return;
     if (index === 0) setupPreviewVideo(meta);
     items.push({ file, meta, index, path: displayPath });
     // 每处理 5 个或最后一个时更新进度（避免频繁 DOM 操作）
@@ -1329,9 +1371,9 @@ function renderCurrent(detail) {
   pauseJobBtn.hidden = paused;
   resumeJobBtn.hidden = !paused;
   cancelJobBtn.disabled = !cancelable;
-  setProcessingVisible(cancelable);
+  setProcessingVisible(cancelable && !estimateBusy && !productionBusy);
   setControlsLocked(cancelable);
-  if (!cancelable && ["done", "error", "canceled"].includes(job.status)) {
+  if (!cancelable && !estimateBusy && !productionBusy && ["done", "error", "canceled"].includes(job.status)) {
     currentJobId = null;
     localStorage.removeItem("currentJobId");
     if (selectedFiles.length) void clearSelectedVideoList();
@@ -1429,22 +1471,26 @@ async function initOrResumeUpload(signal) {
         path: relativePathFor(file),
         name: file.name,
         size: file.size,
+        duration_sec: videoMetadata.get(file)?.duration || null,
       })),
     }),
   }, { fallback: "无法创建上传会话" });
   uploadSessionMemory = { id: session.id, fingerprint };
+  completedUploadFingerprint = null;
   try { localStorage.setItem(uploadSessionStorageKey, JSON.stringify(uploadSessionMemory)); } catch { /* Storage is optional. */ }
   return { fingerprint, session };
 }
 
-async function uploadSelectedFilesResumable(signal) {
-  const { session } = await initOrResumeUpload(signal);
+async function uploadSelectedFilesResumable(signal, plannedSession = null, fileIndices = null) {
+  const session = plannedSession || (await initOrResumeUpload(signal)).session;
+  const indices = fileIndices || selectedFiles.map((_file, index) => index);
   const chunkSize = Number(session.chunk_size) || 8 * 1024 * 1024;
-  const totalBytes = selectedFiles.reduce((total, file) => total + file.size, 0);
-  let uploadedBytes = receivedUploadBytes(selectedFiles, session.files, chunkSize);
+  const totalBytes = indices.reduce((total, index) => total + selectedFiles[index].size, 0);
+  let uploadedBytes = indices.reduce((total, index) => total + receivedUploadBytes(
+    [selectedFiles[index]], [session.files[index]], chunkSize), 0);
   setUploadProgress(totalBytes ? uploadedBytes / totalBytes * 100 : 0);
 
-  for (let fileIndex = 0; fileIndex < selectedFiles.length; fileIndex += 1) {
+  for (const fileIndex of indices) {
     const file = selectedFiles[fileIndex];
     const sessionFile = session.files[fileIndex];
     const received = new Set(sessionFile.received_chunks || []);
@@ -1463,16 +1509,29 @@ async function uploadSelectedFilesResumable(signal) {
         },
       );
       uploadedBytes += chunk.size;
+      received.add(chunkIndex);
+      sessionFile.received_chunks = [...received];
       setUploadProgress(totalBytes ? uploadedBytes / totalBytes * 100 : 100);
-      if (estimateBusy) sizeEstimateHint.textContent = "正在上传视频，上传完成后抽样预估…";
+      sizeEstimateHint.textContent = estimateBusy
+        ? `仅上传 ${indices.length} 个抽样视频，完成后试编码…`
+        : `正在上传整批视频（${selectedFiles.length} 个），已上传的抽样视频将复用…`;
     }
   }
-  completedUploadFingerprint = uploadFingerprint();
-  for (const cell of selectedVideosEl.querySelectorAll(".video-row > span:last-of-type")) cell.textContent = "已上传";
+  const allUploaded = session.files.every(item => item.received_chunks?.length === item.chunk_count);
+  if (allUploaded) completedUploadFingerprint = uploadFingerprint();
+  for (const row of selectedVideosEl.querySelectorAll(".video-row")) {
+    const index = Number(row.querySelector(".remove-video")?.dataset.index);
+    const item = session.files[index];
+    const cell = row.querySelector(":scope > span:last-of-type");
+    if (cell && item) cell.textContent = item.received_chunks?.length === item.chunk_count ? "已上传" : "待上传";
+  }
   return session.id;
 }
 
 async function createJobWithProgress(data) {
+  // Clear samples at the click, before potentially lengthy production uploads.
+  await releaseTemporaryEstimate({ required: true });
+  clearSampleButtons();
   const sessionId = await uploadSelectedFilesResumable();
   data.delete("videos");
   data.delete("video_paths");
@@ -1485,6 +1544,7 @@ async function createJobWithProgress(data) {
   sizeEstimateResult.querySelectorAll(".estimate-preview-button").forEach(button => { button.disabled = true; });
   sizeEstimateHint.textContent = "已开始制作，试编码样片已清理。可在下次制作前重新预估。";
   uploadSessionMemory = null;
+  completedUploadFingerprint = null;
   try { localStorage.removeItem(uploadSessionStorageKey); } catch { /* Storage is optional. */ }
   return created;
 }
@@ -1509,14 +1569,89 @@ function sizeEstimateSignature() {
 }
 
 function hasCurrentEstimate() {
-  return Boolean(selectedFiles.length && estimateSignature && estimatePreviewState?.state.status === "done"
+  return Boolean(selectedFiles.length && !estimateInvalidated && estimateSignature && estimatePreviewState?.state.status === "done"
     && estimateSignature === sizeEstimateSignature());
 }
+
+function clearSampleButtons() {
+  if (activeEstimatePreview) closeVideoPreview();
+  sizeEstimateResult.querySelectorAll(".estimate-preview-button").forEach(button => {
+    button.parentElement.textContent = "临时样片已清理";
+  });
+  for (const item of estimatePreviewState?.state.files || []) item.samples = [];
+}
+
+function estimateCleanupRequest(lease) {
+  return JSON.stringify({ owner_id: lease.ownerId, estimate_id: lease.estimateId });
+}
+
+function releaseTemporaryEstimate({ required = false, leaving = false } = {}) {
+  const lease = temporaryEstimate;
+  temporaryEstimate = null;
+  clearInterval(estimateLeaseTimer);
+  estimateLeaseTimer = null;
+  if (!lease) return required ? estimateCleanupPromise : Promise.resolve();
+  const url = `/api/uploads/${lease.sessionId}/estimate/cleanup`;
+  const body = estimateCleanupRequest(lease);
+  if (leaving) {
+    let queued = false;
+    try { queued = navigator.sendBeacon(url, new Blob([body], { type: "application/json" })); } catch { /* Use keepalive below. */ }
+    if (!queued) void nativeFetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+      body, credentials: "same-origin", keepalive: true }).catch(() => {});
+    return Promise.resolve();
+  }
+  const pending = window.VideoProcessorNetwork.requestJson(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body,
+  }, { fallback: "临时样片清理失败，请检查连接后重试", timeoutMs: 10000 }).catch(error => {
+    if (error.status !== 404) {
+      // Keep the lease available so starting production can retry cleanup.
+      if (!temporaryEstimate) temporaryEstimate = lease;
+      throw error;
+    }
+  });
+  estimateCleanupPromise = pending;
+  return required ? pending : pending.catch(() => {});
+}
+
+function startEstimateLease(lease) {
+  clearInterval(estimateLeaseTimer);
+  estimateLeaseTimer = setInterval(async () => {
+    if (temporaryEstimate !== lease || !lease.estimateId) return;
+    try {
+      await window.VideoProcessorNetwork.requestJson(`/api/uploads/${lease.sessionId}/estimate/lease`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: estimateCleanupRequest(lease),
+      }, { fallback: "临时样片已失效", timeoutMs: 10000 });
+    } catch (error) {
+      if (temporaryEstimate === lease && [404, 409].includes(error.status)) {
+        temporaryEstimate = null;
+        clearInterval(estimateLeaseTimer);
+        estimateInvalidated = true;
+        clearSampleButtons();
+        sizeEstimateHint.textContent = "临时样片已清理，请重新预估后再开始制作。";
+        updateProductionAvailability();
+      }
+    }
+  }, 60000);
+}
+
+window.addEventListener("pagehide", () => {
+  estimateCancelRequested = true;
+  estimateUploadController?.abort();
+  void releaseTemporaryEstimate({ leaving: true });
+});
+window.addEventListener("pageshow", event => {
+  if (!event.persisted || !estimatePreviewState) return;
+  estimateInvalidated = true;
+  clearSampleButtons();
+  sizeEstimateHint.textContent = "离开页面时已清理临时样片，请重新预估。";
+  updateProductionAvailability();
+});
 
 function updateProductionAvailability() {
   const ready = !controlsLocked && hasCurrentEstimate();
   startProductionBtn.disabled = !ready;
-  productionReadyHint.textContent = estimateBusy ? "正在预估，完成后可确认大小和样片。"
+  productionReadyHint.textContent = productionBusy ? "正在补传视频并创建任务，请等待。"
+    : estimateBusy ? "正在预估，完成后可确认大小和样片。"
     : jobControlsLocked ? "当前任务正在制作，完成后可进行下一次预估。"
     : ready ? "预估已完成，确认下方大小和样片后即可开始制作。"
     : estimateSignature ? "视频或参数已更改，请重新预估后再开始制作。"
@@ -1527,14 +1662,19 @@ function invalidateSizeEstimate() {
   estimateSizeBtn.disabled = controlsLocked || !selectedFiles.length;
   updateProductionAvailability();
   if (estimateBusy || !estimateSignature) return;
-  const stale = estimateSignature !== sizeEstimateSignature();
+  const stale = estimateInvalidated || estimateSignature !== sizeEstimateSignature();
+  if (stale) {
+    estimateInvalidated = true;
+    void releaseTemporaryEstimate();
+    clearSampleButtons();
+  }
   sizeEstimateResult.classList.toggle("stale", stale);
   sizeEstimateResult.querySelectorAll(".estimate-preview-button").forEach(button => { button.disabled = stale; });
   if (stale && activeEstimatePreview) closeVideoPreview();
   sizeEstimateHint.textContent = stale
     ? "视频或参数已修改，上次结果仅供对照，请重新预估。"
     : estimatePreviewState?.state.status === "error" ? estimatePreviewState.state.message
-      : "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
+      : estimatePreviewState?.state.message || "预估完成，参考范围仅供参考。";
 }
 
 function renderSizeEstimate(state, sessionId) {
@@ -1545,13 +1685,13 @@ function renderSizeEstimate(state, sessionId) {
   const total = state.totals;
   const ratio = total ? (1 - total.estimated_bytes / total.original_bytes) * 100 : 0;
   const summary = total
-    ? `<p class="estimate-summary">整批预计 <strong>${fmtSize(total.estimated_bytes)}</strong> · 参考范围 ${fmtSize(total.min_bytes)} ～ ${fmtSize(total.max_bytes)}<br><span class="meta">原始 ${fmtSize(total.original_bytes)} · 预计${ratio >= 0 ? "减少" : "增大"} ${Math.abs(ratio).toFixed(1)}%</span></p>`
+    ? `<p class="estimate-summary">整批预计 <strong>${fmtSize(total.estimated_bytes)}</strong> · 参考范围 ${fmtSize(total.min_bytes)} ～ ${fmtSize(total.max_bytes)}<br><span class="meta">共 ${files.length} 个视频 · 实际试编码 ${state.sampled_count || files.length} 个 · 原始 ${fmtSize(total.original_bytes)} · 预计${ratio >= 0 ? "减少" : "增大"} ${Math.abs(ratio).toFixed(1)}%</span></p>`
     : "";
   sizeEstimateResult.innerHTML = summary + `<div class="estimate-table-wrap" tabindex="0" aria-label="视频体积预估结果，可横向滚动"><table class="estimate-table">
     <thead><tr><th scope="col">视频名</th><th scope="col">视频时长</th><th scope="col">原始大小</th><th scope="col">预计大小</th><th scope="col">参考范围</th><th scope="col">实际试编码器</th><th scope="col">视频缩略图</th></tr></thead>
-    <tbody>${files.map((file, index) => `<tr><td>${escapeHtml(file.path)}</td><td>${Number.isFinite(file.duration_sec) ? fmtDuration(file.duration_sec) : "—"}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
+    <tbody>${files.map((file, index) => `<tr><td>${escapeHtml(file.path)}<br><span class="estimate-badge ${file.sampled ? "is-sampled" : ""}">${file.sampled ? "随机抽中 · 实际试编码" : "抽样推算"}</span></td><td>${Number.isFinite(file.duration_sec) ? fmtDuration(file.duration_sec) : "—"}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
       ? `<td colspan="4">${escapeHtml(file.error)}</td>`
-      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${escapeHtml(file.encoder_name)}<br><span class="meta">${file.full_trial ? "完整试编码" : `${file.sample_count} 段抽样`}${file.fallback_reason ? " · 已回退 CPU" : ""}</span></td><td>${file.samples?.length ? `<button type="button" class="estimate-preview-button" data-estimate-preview="${index}" aria-label="查看 ${escapeHtml(file.path)} 的处理后样片"><img src="${sampleUrl(index, 0, "thumbnail")}" alt="处理后的视频缩略图" loading="lazy"><span>▶ 查看处理后画质</span></button>` : "暂无样片"}</td>`}</tr>`).join("")}
+      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${file.sampled ? `${escapeHtml(file.encoder_name)}<br><span class="meta">${file.full_trial ? "完整试编码" : `${file.sample_count} 段抽样`}${file.fallback_reason ? " · 已回退 CPU" : ""}</span>` : `<span class="meta">未试编码<br>${file.estimate_method === "size_ratio" ? "时长未知，按大小比例推算" : "按抽样码率 × 时长推算"}</span>`}</td><td>${file.samples?.length ? `<button type="button" class="estimate-preview-button" data-estimate-preview="${index}" aria-label="查看 ${escapeHtml(file.path)} 的处理后样片"><img src="${sampleUrl(index, 0, "thumbnail")}" alt="处理后的视频缩略图" loading="lazy"><span>▶ 查看处理后画质</span></button>` : "—"}</td>`}</tr>`).join("")}
     </tbody></table></div>`;
   sizeEstimateResult.hidden = false;
 }
@@ -1569,6 +1709,7 @@ estimateSizeBtn.addEventListener("click", async () => {
   const data = processingFormData();
   if (activeEstimatePreview) closeVideoPreview();
   estimateSignature = null;
+  estimateInvalidated = false;
   estimatePreviewState = null;
   estimateBusy = true;
   estimateCancelRequested = false;
@@ -1578,22 +1719,43 @@ estimateSizeBtn.addEventListener("click", async () => {
   setControlsLocked(false);
   sizeEstimateResult.hidden = true;
   sizeEstimateResult.classList.remove("stale");
-  sizeEstimateHint.textContent = "正在上传视频，上传完成后抽样预估…";
+  sizeEstimateHint.textContent = "正在读取视频时长并选择抽样视频…";
   setUploadProgress(0);
   let terminal = false;
+  let lease = null;
   try {
-    estimateSessionId = await uploadSelectedFilesResumable(estimateUploadController.signal);
+    await releaseTemporaryEstimate({ required: true });
+    // Limit metadata readers; do not upload unselected videos just to learn duration.
+    for (let index = 0; index < selectedFiles.length; index += 4) {
+      await Promise.all(selectedFiles.slice(index, index + 4).map(getVideoMetadata));
+      if (estimateCancelRequested) return;
+    }
+    const { session } = await initOrResumeUpload(estimateUploadController.signal);
+    estimateSessionId = session.id;
+    const planned = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${session.id}/estimate-plan`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, signal: estimateUploadController.signal,
+      body: JSON.stringify({ files: selectedFiles.map(file => ({ duration_sec: videoMetadata.get(file)?.duration || null })) }),
+    }, { retries: 4, timeoutMs: 10000, fallback: "无法选择抽样视频" });
+    sizeEstimateHint.textContent = `已随机选择 ${planned.sample_indices.length} / ${selectedFiles.length} 个视频，仅上传抽样视频…`;
+    await uploadSelectedFilesResumable(estimateUploadController.signal, planned, planned.sample_indices);
     if (estimateCancelRequested) return;
     uploadProgress.hidden = true;
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    lease = { sessionId: session.id, ownerId: [...bytes].map(value => value.toString(16).padStart(2, "0")).join(""), estimateId: null };
+    temporaryEstimate = lease;
+    data.set("owner_id", lease.ownerId);
+    startEstimateLease(lease);
     let state = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${estimateSessionId}/estimate`,
       { method: "POST", body: data }, { fallback: "无法开始体积预估" });
+    lease.estimateId = state.id;
     if (estimateCancelRequested && state.status === "running") {
-      await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" });
+      temporaryEstimate = lease;
+      await releaseTemporaryEstimate({ required: true });
     }
     while (["running", "canceling"].includes(state.status)) {
       sizeEstimateHint.textContent = `${state.message}（${state.progress || 0}%）`;
       await new Promise(resolve => setTimeout(resolve, 1000));
-      state = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${estimateSessionId}/estimate`,
+      state = await window.VideoProcessorNetwork.requestJson(`/api/uploads/${estimateSessionId}/estimate?owner_id=${lease.ownerId}`,
         { signal: estimateUploadController.signal }, {
           retries: 4, timeoutMs: 10000, fallback: "读取预估进度失败",
           onRetry: (attempt, retries) => {
@@ -1603,8 +1765,8 @@ estimateSizeBtn.addEventListener("click", async () => {
     }
     terminal = true;
     renderSizeEstimate(state, estimateSessionId);
-    estimateSignature = (state.files || []).some(file => file.samples?.length) ? signature : null;
-    if (state.status === "done") sizeEstimateHint.textContent = "预估完成，包含水印和音频。参考范围并非保证；未抽到的复杂场景可能使实际大小超出范围。";
+    estimateSignature = state.status === "done" && (state.files || []).some(file => file.samples?.length) ? signature : null;
+    if (state.status !== "done") void releaseTemporaryEstimate();
     if (state.files?.length) requestAnimationFrame(() => document.querySelector("#sizeEstimatePanel").scrollIntoView({
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start",
     }));
@@ -1615,8 +1777,8 @@ estimateSizeBtn.addEventListener("click", async () => {
         : error.message;
   } finally {
     // A lost polling connection must not leave an invisible trial running.
-    if (estimateSessionId && !terminal) {
-      try { await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" }); } catch { /* Retry is possible after reconnection. */ }
+    if (lease && !terminal) {
+      await releaseTemporaryEstimate();
     }
     estimateBusy = false;
     estimateUploadController = null;
@@ -1634,8 +1796,7 @@ cancelEstimateBtn.addEventListener("click", async () => {
   estimateUploadController?.abort();
   if (estimateSessionId) {
     try {
-      const response = await fetch(`/api/uploads/${estimateSessionId}/estimate`, { method: "DELETE" });
-      if (!response.ok && response.status !== 404) throw new Error("取消请求未成功，将继续显示预估进度");
+      await releaseTemporaryEstimate({ required: true });
     } catch (error) {
       sizeEstimateHint.textContent = error.message;
       cancelEstimateBtn.disabled = false;
@@ -1821,6 +1982,7 @@ form.addEventListener("submit", async (event) => {
   saveEncodingSettings();
   const submit = startProductionBtn;
   submit.textContent = "正在创建任务…";
+  productionBusy = true;
   setUploadProgress(0);
   try {
     const data = processingFormData();
@@ -1835,6 +1997,9 @@ form.addEventListener("submit", async (event) => {
     setControlsLocked(false);
     alert(error.message);
   } finally {
+    productionBusy = false;
+    setControlsLocked(jobControlsLocked);
+    setProcessingVisible(jobControlsLocked);
     submit.textContent = "开始制作";
     updateProductionAvailability();
     setTimeout(() => { uploadProgress.hidden = true; }, 1000);

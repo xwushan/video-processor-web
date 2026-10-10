@@ -12,6 +12,47 @@ from processVideo import _hidden_subprocess_kwargs, _probe_video, _tool_path, ge
 
 SAMPLE_SECONDS = 8.0
 SAMPLE_TIMEOUT_SECONDS = 120
+BATCH_SAMPLE_LIMIT = 3
+
+
+def optional_duration(value):
+    """Browser metadata is advisory; production still probes every source."""
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    return duration if math.isfinite(duration) and 0 < duration < 1e9 else None
+
+
+def project_batch(files, measured):
+    """Extrapolate untested files, keeping them visibly distinct from trials."""
+    trials = list(measured.values())
+    duration_total = sum(t["duration_sec"] for t in trials)
+    original_total = sum(t["original_bytes"] for t in trials)
+    rates = {key: sum(t[key] for t in trials) / duration_total
+             for key in ("estimated_bytes", "min_bytes", "max_bytes")}
+    ratios = {key: sum(t[key] for t in trials) / original_total for key in rates}
+    results = []
+    for index, item in enumerate(files):
+        if index in measured:
+            results.append(measured[index])
+            continue
+        duration = optional_duration(item.get("duration_sec"))
+        unit = duration if duration else item["size"]
+        basis = rates if duration else ratios
+        expected = basis["estimated_bytes"] * unit
+        # Different recordings can have very different complexity, even at the
+        # same resolution. Show a wider reference band for files we did not encode.
+        low = min(expected * .6, min(t["min_bytes"] / (t["duration_sec"] if duration
+                  else t["original_bytes"]) for t in trials) * unit * .75)
+        high = max(expected * 1.6, max(t["max_bytes"] / (t["duration_sec"] if duration
+                   else t["original_bytes"]) for t in trials) * unit * 1.25)
+        results.append({"path": item["path"], "original_bytes": item["size"],
+                        "duration_sec": duration, "estimated_bytes": max(1, round(expected)),
+                        "min_bytes": max(1, round(low)), "max_bytes": max(1, round(high)),
+                        "sampled": False, "estimate_method": "duration" if duration else "size_ratio",
+                        "samples": [], "sample_count": 0})
+    return results
 
 
 class EstimateCanceled(Exception):
