@@ -22,3 +22,4 @@ deploy/dependency-audit-*.json
 # Deployment backups and exported images must stay out of Git.
 /backups/
 /video-processor*.tar*
+/releases/

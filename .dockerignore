@@ -19,3 +19,4 @@ deploy/*.jpg
 deploy/dependency-audit-*.json
 backups
 video-processor*.tar*
+releases

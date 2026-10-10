@@ -42,7 +42,9 @@ jobs:
           VIDEO_PROCESSOR_AUTH_PASSWORD: ci-config-only
           VIDEO_PROCESSOR_IMAGE_TAG: ${{ github.sha }}
           VIDEO_PROCESSOR_REVISION: ${{ github.sha }}
-        run: docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml config --quiet
+        run: |
+          docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml config --quiet
+          docker compose -f deploy/compose.baota.yaml config --quiet
       - name: Build and validate CPU container
         env:
           VIDEO_PROCESSOR_MIN_FREE_GB: '0'

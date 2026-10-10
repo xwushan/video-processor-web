@@ -3,6 +3,8 @@
 适用：Ubuntu x86_64、RTX 3090、Docker Engine + Compose 插件。NVIDIA 驱动及 Container Toolkit
 按 [ubuntu-nvidia.md](ubuntu-nvidia.md) 安装。维持单个应用容器、单个 Uvicorn worker。
 CPU 与 GPU 并发均根据资源增加，GPU 默认上限 8，新增任务的资源阈值为 80%。
+使用宝塔进行首次离线部署时，可采用 [宝塔部署步骤](baota-ubuntu.md) 和独立的
+[compose.baota.yaml](compose.baota.yaml)，数据保存到宿主机目录；已有部署保持原数据挂载方式。
 
 ## 发布配置与版本
 
