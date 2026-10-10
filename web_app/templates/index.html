@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频处理器</title>
-  <link rel="stylesheet" href="/static/app.css?v=20261010-batch-estimate">
+  <link rel="stylesheet" href="/static/app.css?v=20261010-sample-list">
 </head>
 <body>
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
@@ -267,7 +267,7 @@
                 <button id="startProductionBtn" type="submit" aria-describedby="productionReadyHint" disabled>开始制作</button>
               </div>
             </div>
-            <p id="sizeEstimateHint" class="meta" role="status">最多随机抽取 3 个视频试编码，其余按抽样推算。预估只上传抽样视频，开始制作时补传其余视频；样片在制作、参数变化或离开页面后清理。</p>
+            <p id="sizeEstimateHint" class="meta" role="status">列表只显示最多 3 个试编码样本，整批预计大小包含其余视频的推算结果。预估只上传抽样视频，开始制作时补传其余视频；样片在制作、参数变化或离开页面后清理。</p>
             <div id="sizeEstimateResult" hidden></div>
           <div id="uploadProgress" class="upload-progress" hidden>
             <span>上传进度</span>
@@ -358,7 +358,7 @@
     </div>
   </div>
   <div id="parameterTooltip" class="parameter-tooltip" role="tooltip" hidden></div>
-  <script src="/static/network.js?v=20261010-batch-estimate"></script>
-  <script src="/static/app.js?v=20261010-batch-estimate"></script>
+  <script src="/static/network.js?v=20261010-sample-list"></script>
+  <script src="/static/app.js?v=20261010-sample-list"></script>
 </body>
 </html>

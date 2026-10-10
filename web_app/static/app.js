@@ -1682,16 +1682,18 @@ function renderSizeEstimate(state, sessionId) {
   sizeEstimateHint.textContent = state.message || "正在预估…";
   const files = state.files || [];
   if (!files.length) return;
+  // Keep original file indices so sample links still point to the selected videos.
+  const sampledFiles = files.map((file, index) => ({ file, index })).filter(({ file }) => file.sampled);
   const total = state.totals;
   const ratio = total ? (1 - total.estimated_bytes / total.original_bytes) * 100 : 0;
   const summary = total
-    ? `<p class="estimate-summary">整批预计 <strong>${fmtSize(total.estimated_bytes)}</strong> · 参考范围 ${fmtSize(total.min_bytes)} ～ ${fmtSize(total.max_bytes)}<br><span class="meta">共 ${files.length} 个视频 · 实际试编码 ${state.sampled_count || files.length} 个 · 原始 ${fmtSize(total.original_bytes)} · 预计${ratio >= 0 ? "减少" : "增大"} ${Math.abs(ratio).toFixed(1)}%</span></p>`
+    ? `<p class="estimate-summary">整批预计 <strong>${fmtSize(total.estimated_bytes)}</strong> · 参考范围 ${fmtSize(total.min_bytes)} ～ ${fmtSize(total.max_bytes)}<br><span class="meta">共 ${files.length} 个视频 · 列表仅显示 ${sampledFiles.length} 个试编码样本 · 原始 ${fmtSize(total.original_bytes)} · 预计${ratio >= 0 ? "减少" : "增大"} ${Math.abs(ratio).toFixed(1)}%</span></p>`
     : "";
   sizeEstimateResult.innerHTML = summary + `<div class="estimate-table-wrap" tabindex="0" aria-label="视频体积预估结果，可横向滚动"><table class="estimate-table">
     <thead><tr><th scope="col">视频名</th><th scope="col">视频时长</th><th scope="col">原始大小</th><th scope="col">预计大小</th><th scope="col">参考范围</th><th scope="col">实际试编码器</th><th scope="col">视频缩略图</th></tr></thead>
-    <tbody>${files.map((file, index) => `<tr><td>${escapeHtml(file.path)}<br><span class="estimate-badge ${file.sampled ? "is-sampled" : ""}">${file.sampled ? "随机抽中 · 实际试编码" : "抽样推算"}</span></td><td>${Number.isFinite(file.duration_sec) ? fmtDuration(file.duration_sec) : "—"}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
+    <tbody>${sampledFiles.map(({ file, index }) => `<tr><td>${escapeHtml(file.path)}<br><span class="estimate-badge is-sampled">${files.length > sampledFiles.length ? "随机抽中 · 实际试编码" : "实际试编码"}</span></td><td>${Number.isFinite(file.duration_sec) ? fmtDuration(file.duration_sec) : "—"}</td><td>${fmtSize(file.original_bytes)}</td>${file.error
       ? `<td colspan="4">${escapeHtml(file.error)}</td>`
-      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${file.sampled ? `${escapeHtml(file.encoder_name)}<br><span class="meta">${file.full_trial ? "完整试编码" : `${file.sample_count} 段抽样`}${file.fallback_reason ? " · 已回退 CPU" : ""}</span>` : `<span class="meta">未试编码<br>${file.estimate_method === "size_ratio" ? "时长未知，按大小比例推算" : "按抽样码率 × 时长推算"}</span>`}</td><td>${file.samples?.length ? `<button type="button" class="estimate-preview-button" data-estimate-preview="${index}" aria-label="查看 ${escapeHtml(file.path)} 的处理后样片"><img src="${sampleUrl(index, 0, "thumbnail")}" alt="处理后的视频缩略图" loading="lazy"><span>▶ 查看处理后画质</span></button>` : "—"}</td>`}</tr>`).join("")}
+      : `<td>${fmtSize(file.estimated_bytes)}</td><td>${fmtSize(file.min_bytes)} ～ ${fmtSize(file.max_bytes)}</td><td>${escapeHtml(file.encoder_name)}<br><span class="meta">${file.full_trial ? "完整试编码" : `${file.sample_count} 段抽样`}${file.fallback_reason ? " · 已回退 CPU" : ""}</span></td><td>${file.samples?.length ? `<button type="button" class="estimate-preview-button" data-estimate-preview="${index}" aria-label="查看 ${escapeHtml(file.path)} 的处理后样片"><img src="${sampleUrl(index, 0, "thumbnail")}" alt="处理后的视频缩略图" loading="lazy"><span>▶ 查看处理后画质</span></button>` : "—"}</td>`}</tr>`).join("")}
     </tbody></table></div>`;
   sizeEstimateResult.hidden = false;
 }
