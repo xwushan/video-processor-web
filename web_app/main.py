@@ -82,7 +82,7 @@ AUTH_USER = os.getenv("VIDEO_PROCESSOR_AUTH_USER", "admin").strip() or "admin"
 AUTH_PASSWORD = os.getenv("VIDEO_PROCESSOR_AUTH_PASSWORD", "")
 AUTH_COOKIE_NAME = "video_processor_session"
 AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 APP_REVISION = os.getenv("VIDEO_PROCESSOR_REVISION", "unknown")
 
 THIS_DIR = Path(__file__).resolve().parent

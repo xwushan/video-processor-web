@@ -1914,6 +1914,9 @@ button.danger:hover {
 }
 
 @media (min-width: 1301px) {
+  .video-panel:has(.video-body.empty) { grid-template-rows: auto minmax(0, 1fr); }
+  .video-panel:has(.video-body.empty) .video-table { display: flex; flex-direction: column; min-height: 0; }
+  .video-panel .video-body.empty { flex: 1; max-height: none; }
   .process-params-panel { grid-template-rows: auto minmax(0, 1fr); }
   .process-params-panel .three { display: flex; flex-direction: column; align-items: stretch; }
   .process-params-panel .estimate-params-actions { margin-top: auto; }
