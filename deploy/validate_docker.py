@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--url", default="http://127.0.0.1:8899")
     parser.add_argument("--container", help="Use docker exec for a separate test container")
+    parser.add_argument("--check-health-proxy", action="store_true",
+                        help="Verify the configured health check bypasses inherited HTTP proxies")
     args = parser.parse_args()
     password = os.getenv("VIDEO_PROCESSOR_AUTH_PASSWORD", "")
     username = os.getenv("VIDEO_PROCESSOR_AUTH_USER", "admin")
@@ -99,6 +101,21 @@ def main():
     assert config['gpu']['available'] == args.gpu, config['gpu']
     assert config['gpu_concurrency_mode'] == 'auto' and config['gpu_target_percent'] == 80
     assert payload('/health')['ok']
+    if args.check_health_proxy:
+        container = args.container or subprocess.check_output(
+            ['docker', 'compose', 'ps', '-q', 'video-processor'], text=True).strip()
+        health = json.loads(subprocess.check_output([
+            'docker', 'inspect', '--format', '{{json .Config.Healthcheck.Test}}', container,
+        ], text=True))
+        assert health and health[0] in ('CMD', 'CMD-SHELL'), 'Container needs an executable health check'
+        health_command = health[1:] if health[0] == 'CMD' else ['sh', '-c', health[1]]
+        subprocess.run([
+            'docker', 'exec',
+            '-e', 'HTTP_PROXY=http://127.0.0.1:1', '-e', 'http_proxy=http://127.0.0.1:1',
+            '-e', 'HTTPS_PROXY=http://127.0.0.1:1', '-e', 'https_proxy=http://127.0.0.1:1',
+            '-e', 'NO_PROXY=', '-e', 'no_proxy=', container, *health_command,
+        ], check=True, timeout=15)
+        print('PASS: configured container health check bypasses HTTP proxies for loopback', flush=True)
     assert payload('/api/current-job')['job'] is None, 'Run smoke tests while the service is idle'
     try:
         command('ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=15',

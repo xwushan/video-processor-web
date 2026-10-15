@@ -8,6 +8,18 @@ services:
     restart: unless-stopped
     ports:
       - "${VIDEO_PROCESSOR_BIND_IP:-0.0.0.0}:${VIDEO_PROCESSOR_PORT:-8899}:8899"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8899/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       VIDEO_PROCESSOR_ROOT: /data/video-processor

@@ -30,9 +30,12 @@ docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build --wait
 GPU 模式的启动、停止、更新命令均使用这两个 Compose 文件。
 普通 `docker compose up -d` 使用 CPU 部署配置，自动模式会选择 CPU。
 详细安装步骤及内网离线部署方法见 [Ubuntu + RTX 3090 部署说明](deploy/ubuntu-nvidia.md)。
-使用宝塔管理 Ubuntu 服务器时，见 [宝塔导入镜像及创建容器步骤](deploy/baota-ubuntu.md)：
-上传离线部署包，在宝塔 Docker 导入 `image.tar`，再配置端口、数据目录、登录密码和 GPU。
-若面板创建容器的表单没有 GPU 选项，可在宝塔容器编排中使用 [compose.baota.yaml](deploy/compose.baota.yaml)。
+使用宝塔管理 Ubuntu 服务器时，见 [宝塔从头部署步骤](deploy/baota-ubuntu.md)：
+导入 `image.tar` 后，在宝塔「容器编排」先使用 [基础配置](deploy/compose.baota-panel.cpu.yaml)，
+在 `.env 内容` 中设置 [账号密码与端口](deploy/baota-panel.env.example)；基础服务正常后，
+将同一项目更新为 [GPU 配置](deploy/compose.baota-panel.gpu.yaml)，保留原数据卷。
+异常时可用 [只读诊断脚本](deploy/diagnose_baota.sh) 收集信息；已有目录挂载方式继续参考
+[compose.baota.yaml](deploy/compose.baota.yaml)。
 
 页面分别保存 CPU 的 CRF/编码策略和 GPU 的 CQ/编码策略。数值越小画质越高，文件通常越大，
 但 CRF 与 CQ 不能直接等同。CPU 默认 CRF 32，GPU 默认 CQ 32、均衡策略 p4，并发根据资源自动调节；

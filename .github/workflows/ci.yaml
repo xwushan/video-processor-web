@@ -45,6 +45,8 @@ jobs:
         run: |
           docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml config --quiet
           docker compose -f deploy/compose.baota.yaml config --quiet
+          docker compose -f deploy/compose.baota-panel.cpu.yaml config --quiet
+          docker compose -f deploy/compose.baota-panel.gpu.yaml config --quiet
       - name: Build and validate CPU container
         env:
           VIDEO_PROCESSOR_MIN_FREE_GB: '0'
@@ -53,7 +55,7 @@ jobs:
         run: |
           docker compose build
           docker compose up -d --wait --wait-timeout 90
-          python deploy/validate_docker.py
+          python deploy/validate_docker.py --check-health-proxy
       - name: Container logs
         if: failure()
         run: docker compose logs --tail=200

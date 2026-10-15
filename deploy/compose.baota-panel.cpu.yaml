@@ -1,0 +1,51 @@
+# BaoTa editor: paste this file into "compose content".
+# Paste baota-panel.env.example into ".env content" and set a password.
+# First start without a GPU request; switch the SAME project to the GPU file later.
+services:
+  video-processor:
+    image: video-processor-web:${VIDEO_PROCESSOR_IMAGE_TAG:-1.3.8-787b7c9}
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${VIDEO_PROCESSOR_BIND_IP:-0.0.0.0}:${VIDEO_PROCESSOR_PORT:-8899}:8899"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8899/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    environment:
+      TZ: Asia/Shanghai
+      VIDEO_PROCESSOR_ROOT: /data/video-processor
+      VIDEO_PROCESSOR_AUTH_USER: ${VIDEO_PROCESSOR_AUTH_USER:-admin}
+      VIDEO_PROCESSOR_AUTH_PASSWORD: ${VIDEO_PROCESSOR_AUTH_PASSWORD:?Set a nonempty password in the BaoTa .env field}
+      VIDEO_PROCESSOR_ENCODER_DEVICE: auto
+      VIDEO_PROCESSOR_GPU_MAX_CONCURRENT: "8"
+      VIDEO_PROCESSOR_GPU_CPU_THREADS: "4"
+      VIDEO_PROCESSOR_MIN_FREE_GB: "20"
+    volumes:
+      - video-data:/data/video-processor
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  video-data:
+    name: video-processor-web-data
