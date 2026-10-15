@@ -4,6 +4,8 @@
 RTX 3090 支持 H.264、HEVC 的 NVENC 编码；本版本使用 GPU 编码、CPU 解码和水印，保持现有固定/动态水印逻辑。
 GPU 支持依据：[NVIDIA 官方支持矩阵](https://developer.nvidia.com/video-encode-decode-support-matrix)。
 
+已经通过宝塔导入镜像并部署成功的服务器保持现有项目；宝塔操作以 [宝塔 Docker 指南](baota-ubuntu.md) 为准，其他方式见 [部署总览](README.md)。本页补充 GPU 宿主机环境。
+
 ## 1. 确认驱动
 
 在 Ubuntu 宿主机执行：
@@ -17,6 +19,16 @@ docker compose version
 `lspci` 识别到显卡只说明硬件存在，`nvidia-smi` 正常返回才说明驱动已工作。
 如果驱动未安装或损坏，先按服务器 Ubuntu 版本安装 NVIDIA 驱动，再继续。
 不要把宿主机显卡驱动装进应用镜像。
+
+若提示 `Driver/library version mismatch`，先读取实际版本：
+
+```bash
+cat /proc/driver/nvidia/version
+modinfo -F version nvidia
+sudo dmesg -T | grep -Ei 'NVRM|API mismatch' | tail -n 20
+```
+
+本次现场已加载模块为 580.173.02，磁盘模块/库为 580.178.04，版本一致后恢复正常。升级后的旧模块仍加载时，通常在维护窗口重启服务器；如果磁盘模块与库也不一致，先核对驱动安装状态。重启整机、Docker 或重载驱动可能影响其他服务，按维护流程处理。[Ubuntu 官方驱动故障说明](https://ubuntu.com/server/docs/nvidia-drivers-installation/)
 
 ## 2. 安装 NVIDIA Container Toolkit
 
@@ -53,13 +65,20 @@ VIDEO_PROCESSOR_ENCODER_DEVICE=auto
 VIDEO_PROCESSOR_GPU_DEVICE_ID=0
 VIDEO_PROCESSOR_GPU_MAX_CONCURRENT=8
 VIDEO_PROCESSOR_GPU_CPU_THREADS=4
+VIDEO_PROCESSOR_AUTH_USER=admin
+VIDEO_PROCESSOR_AUTH_PASSWORD='填写自己的登录密码'
 ```
 
 ```bash
-docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build --wait
-docker compose -f compose.yaml -f compose.nvidia.yaml ps
-docker compose -f compose.yaml -f compose.nvidia.yaml logs --tail=100
+chmod 600 .env
+export VIDEO_PROCESSOR_REVISION="$(git rev-parse HEAD)"
+export VIDEO_PROCESSOR_IMAGE_TAG="$VIDEO_PROCESSOR_REVISION"
+docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml up -d --build --wait
+docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml ps
+docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml logs --tail=100
 ```
+
+把完整提交号保存到 .env 的镜像标签和 revision，后续管理使用相同的三个 Compose 文件。完整发布与回滚步骤见 [Docker 部署](docker.md)。
 
 访问 `http://服务器IP:8899`。页面应显示服务器 GPU 名称；选择自动时显示 GPU 的 CQ 和策略，
 并保留独立的 CPU 参数用于回退。CPU CRF 和 GPU CQ 均默认为 32，可先以默认参数处理代表性视频，确认画质、体积及总耗时。
@@ -67,32 +86,18 @@ docker compose -f compose.yaml -f compose.nvidia.yaml logs --tail=100
 验证容器内 H.264 硬件编码：
 
 ```bash
-docker compose -f compose.yaml -f compose.nvidia.yaml exec -T video-processor ffmpeg -hide_banner -v error -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -c:v h264_nvenc -preset p4 -f null -
+docker compose -f compose.yaml -f compose.nvidia.yaml -f compose.production.yaml exec -T video-processor ffmpeg -hide_banner -v error -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -c:v h264_nvenc -preset p4 -f null -
 ```
 
 正常完成并返回退出码 0 即表示 GPU 编码可用。检查页面前需确认应用容器已启用 GPU 透传。
 宿主机 `nvidia-smi` 正常，或 FFmpeg 列出 `h264_nvenc`，都不能代替容器内实际试编码。
 
-旧服务数据迁移请先完整备份，并遵照 README 中保持绝对路径的说明。
+旧服务数据迁移请先完整备份，并遵照 [运维手册](operations.md) 中保持绝对路径的说明。
 不要让旧服务和 Docker 服务同时读写同一个数据目录。
 
 ## 4. 内网不能拉取镜像时
 
-在能联网的 x86_64 机器上构建并导出本项目镜像：
-
-```bash
-docker compose build
-docker save -o video-processor-web.tar video-processor-web:local
-```
-
-将镜像、`compose.yaml`、`compose.nvidia.yaml` 和 `.env.example` 复制到服务器。
-在服务器加载镜像后启动，无需拉取基础镜像或下载 Python 依赖：
-
-```bash
-docker load -i video-processor-web.tar
-# 第一次部署时从 .env.example 创建 .env，然后填写配置。
-docker compose -f compose.yaml -f compose.nvidia.yaml up -d --no-build --pull never --wait
-```
+按 [Docker 离线导入步骤](docker.md#3-离线导入已交付镜像) 保存和加载镜像，使用相同标签的 panel 编排，填写非空登录密码；也可直接参考 [宝塔图形部署](baota-ubuntu.md)。不需要在服务器下载基础镜像或 Python 依赖。
 
 离线加载应用镜像仍需要宿主机已安装 NVIDIA 驱动和 Container Toolkit。
 

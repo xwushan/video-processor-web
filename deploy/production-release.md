@@ -6,6 +6,8 @@ CPU 与 GPU 并发均根据资源增加，GPU 默认上限 8，新增任务的�
 使用宝塔进行首次离线部署时，采用 [宝塔部署步骤](baota-ubuntu.md)，先启动基础服务，
 再更新同一项目的 GPU 配置；新部署使用命名数据卷，已有部署保持原数据挂载方式。
 
+所有部署方式见 [部署总览](README.md)；不使用 Docker 时见 [Ubuntu 普通部署](native-ubuntu.md) 或 [宝塔 Python 网站](baota-native.md)。通用参数、数据迁移和日常备份见 [运维手册](operations.md)。
+
 ## 发布配置与版本
 
 首次部署复制 `.env.example` 到 `.env`；已有部署保留原 `.env`，补充新增配置。

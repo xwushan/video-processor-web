@@ -62,7 +62,7 @@ http://Ubuntu服务器实际IP:8899
 2. .env 内容保持第一阶段的账号、密码、端口和镜像标签。
 3. 更新/重新部署该项目。两份文件使用同一个数据卷，已验证 CPU 切换 GPU 后数据库记录和视频校验值保持一致。
 
-GPU 编排使用 NVIDIA 第 0 张卡，包含 `compute,video,utility` 驱动能力，配置形式符合 [Docker Compose GPU 官方说明](https://docs.docker.com/compose/how-tos/gpu-support/)。
+GPU 编排默认使用 NVIDIA 第 0 张卡，可通过 .env 的 `VIDEO_PROCESSOR_GPU_DEVICE_ID` 调整，包含 `compute,video,utility` 驱动能力，配置形式符合 [Docker Compose GPU 官方说明](https://docs.docker.com/compose/how-tos/gpu-support/)。
 
 GPU 请求由 Docker 在启动应用前处理。**即使应用选择 auto，驱动或 GPU 运行时未配置好时，Docker 仍会拒绝创建 GPU 容器，应用没有机会回退 CPU。** 第一阶段正是为了把这种故障与应用启动故障分开。
 
@@ -110,4 +110,6 @@ bash diagnose_baota.sh video-processor-web > video-processor-diagnostic.txt 2>&1
 
 以后在同一项目中更新镜像标签并重新部署，保留 .env、端口和数据卷。备份时，等待任务完成并停止应用容器后，备份完整 `video-processor-web-data` 卷和编排/.env 配置；备份不放在同一卷中。
 
-当前验证环境为本机 Docker Desktop 的 Linux/amd64 容器和 RTX 3060 Laptop；已验证镜像完整性、CPU/GPU 真实编码、网页登录与全批制作。**公司 Ubuntu / RTX 3090 的现场异常尚无日志，不能把本机通过视为公司已经部署成功。** 按本文分阶段部署，可将故障定位到明确的一层。
+公司 Ubuntu / RTX 3090 已由用户确认部署完成。现场曾出现 NVIDIA 驱动库与已加载模块版本不一致：580.178.04 与 580.173.02；处理后两者为 580.178.04，宿主机 `nvidia-smi` 正常，使用上述交付镜像实际试编码 H.264/H.265 均可用。详见 [复查与现场验收记录](baota-recheck-20261015.md)。
+
+后续按 [运维手册](operations.md) 管理参数、备份、更新和回滚；其他部署方式与反向代理见 [部署总览](README.md)。已经正常运行的服务器无需为了文档更新重建项目。

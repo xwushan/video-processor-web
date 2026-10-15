@@ -4,7 +4,7 @@
 
 原交付镜像 `video-processor-web:1.3.8-787b7c9` 的文件和应用运行验证通过，可继续使用。
 发现并修复了一个可复现的健康检查兼容问题，同时把宝塔流程调整为先验证基础服务，再在同一项目启用 GPU。
-尚未取得公司服务器的具体错误日志，**不能确认此次服务器异常的根因，也没有在公司服务器完成远程部署**。
+后续现场日志确认宿主机 NVIDIA 驱动库与已加载模块不一致；修复后宿主机正常，交付镜像在 RTX 3090 上实际试编码通过，用户确认公司服务器已经部署完成。现场结果来自用户提供的命令输出与确认，下面的完整浏览器和批处理回归则在本机隔离环境完成。
 
 ## 镜像检查
 
@@ -58,12 +58,45 @@ GPU 编排会先向 Docker 请求 GPU。驱动、Container Toolkit 或设备分�
 
 新流程统一使用宝塔容器编排；诊断在 Ubuntu 宿主机终端收集具体容器状态、错误和日志。
 
-## 验证范围与下一步
+## 公司服务器现场验收补充
+
+服务器为 Ubuntu、双路 Xeon Platinum 8163、96 逻辑线程、约 125 GiB 内存、RTX 3090 24 GiB，由宝塔 Docker 管理。
+
+现场 `nvidia-smi` 报 `Driver/library version mismatch`，日志明确显示：
+
+| 项目 | 异常时 | 处理后 |
+| --- | --- | --- |
+| 已加载 NVIDIA 内核模块 | 580.173.02 | 580.178.04 |
+| 磁盘模块 / NVML 客户端 | 580.178.04 | 580.178.04 |
+| nvidia-smi | 初始化失败 | 正常识别 RTX 3090 |
+
+宿主机恢复后，用户执行实际交付镜像的 GPU 探测：
+
+```bash
+docker run --rm --gpus device=0 -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility video-processor-web:1.3.8-787b7c9 python -c "from web_app.encoding import get_gpu_capabilities; print(get_gpu_capabilities())"
+```
+
+结果 `available=True`、显卡名称 `NVIDIA GeForce RTX 3090`，H.264 的 `h264_nvenc` 与 H.265 的 `hevc_nvenc` 均为可用。用户随后确认“现在已经部署好了”。此前创建异常不能归结为镜像损坏；现场 GPU 前置环境确实存在驱动版本错误。
+
+若以后驱动升级再次出现相同现象，在维护窗口处理模块加载与版本一致性；整机重启会影响服务器业务，不能视为无影响操作。
+
+## 验证范围
 
 本机为 Windows Docker Desktop 29.8.1 / Compose 5.5.1，运行 Linux/amd64 容器；实际测试 GPU 为 RTX 3060 Laptop，驱动 546.33。
-公司服务器为 Ubuntu / RTX 3090，不能用本机测试替代该服务器的 NVIDIA 运行时、宝塔版本、端口和网络验收。
+公司服务器的 GPU 命令输出与部署成功确认已补充在上节；没有通过远程连接独立复测公司网站全部流程或其满负载吞吐量。
 
-按 [重新梳理的宝塔步骤](baota-ubuntu.md) 操作：先使用 `compose.baota-panel.cpu.yaml`，基础服务正常后将同一项目更新为 `compose.baota-panel.gpu.yaml`。
-如仍异常，运行 `diagnose_baota.sh`，结合宝塔编排部署日志即可定位到具体环节。
+新部署按 [宝塔步骤](baota-ubuntu.md) 分阶段操作；已部署实例沿用原项目和数据。后续异常使用 `diagnose_baota.sh` 配合具体部署日志诊断；参数、更新和备份见 [运维手册](operations.md)，普通 Python 部署见 [部署总览](README.md)。
 
 此前全局 Windows Python 缺少 psutil，未将其导入失败当作镜像错误；55 项回归已改在实际交付镜像的 Linux Python 环境中重新运行并通过。
+
+## 部署文档与普通启动脚本验收
+
+补齐 Docker、宝塔、Ubuntu 原生 Python、宝塔 Python、反向代理及运维文档。普通启动脚本支持解释器、源码目录、监听地址和端口，systemd 模板使用独立账号并要求非空密码。
+
+- 在隔离 Linux 容器中使用普通部署脚本启动，验证单 worker、自定义端口 9107、非 root/只读代码环境，以及包含 `$` 和 `#` 的字面密码。
+- 验证未登录不能读取任务接口、空密码生产启动被拒绝，健康接口正常。
+- 经该启动方式完成 H.264/H.265/MKV、水印、音轨、上传下载、打包、预估样片/Range/清理、同名文件与暂停恢复。
+- Nginx 模板通过实际 `nginx -t`，部署文档相对链接与 Bash 语法检查通过。
+- 两份 panel 编排验证自定义保留时间、磁盘余量、上传限制、GPU 并发/线程、设备编号和通知变量传递，并保持相同数据卷、拒绝空密码。
+
+这些检查使用独立临时容器和数据卷，结束后已清理；没有重部署现有本机容器或公司服务器。systemd 单元静态验证纳入 Ubuntu CI，原生方式仍需在目标主机以实际服务账号检查 GPU 与设备权限。
