@@ -274,9 +274,16 @@ def _get_format_config(format_type, encoder_preset=None):
 
 
 
-def _get_video_codec_args(format_type, quality, encoder_preset=None):
-    """Return CPU video encoder args."""
+def _get_video_codec_args(format_type, quality, encoder_preset=None,
+                          encoder_device="cpu", gpu_quality=32, gpu_preset="p4"):
+    """CPU CRF and NVENC CQ are intentionally independent quality controls."""
     common = "-pix_fmt yuv420p"
+    if encoder_device == "nvidia":
+        preset = gpu_preset if gpu_preset in {f"p{i}" for i in range(1, 8)} else "p4"
+        cq = _bounded_int(gpu_quality, 32, 1, 51)
+        codec = "hevc_nvenc" if format_type == "h265" else "h264_nvenc"
+        tag = " -tag:v hvc1" if format_type == "h265" else ""
+        return f'-c:v {codec} -gpu 0 -preset {preset} -tune hq -rc vbr -cq {cq} -b:v 0{tag} {common}'
     fmt = _get_format_config(format_type, encoder_preset)
     return f'-c:v {fmt["codec"]} -crf {quality} {fmt["extra"]} {common}'
 
@@ -290,7 +297,7 @@ def _bounded_int(value, default, min_value, max_value):
 
 
 def _dynamic_watermark_expressions(interval, hold_seconds, video_width, video_height,
-                                   watermark_w, watermark_h):
+                                   watermark_w, watermark_h, time_offset=0):
     """Return constant-size FFmpeg expressions for time-segmented watermark positions."""
     max_x = max(0, video_width - watermark_w)
     max_y = max(0, video_height - watermark_h)
@@ -298,22 +305,25 @@ def _dynamic_watermark_expressions(interval, hold_seconds, video_width, video_he
     margin_y = min(100, max_y // 4)
     range_x = max(0, max_x - margin_x * 2)
     range_y = max(0, max_y - margin_y * 2)
-    slot = f"floor(t/{interval})"
+    clock = f"(t+{time_offset:.6f})" if time_offset else "t"
+    slot = f"floor({clock}/{interval})"
     x_expr = f"{margin_x}+trunc({range_x}*abs(sin(({slot}+1)*12.9898)))"
     y_expr = f"{margin_y}+trunc({range_y}*abs(sin(({slot}+1)*78.233)))"
-    enable_expr = f"lt(mod(t,{interval}),{hold_seconds})"
+    enable_expr = f"lt(mod({clock},{interval}),{hold_seconds})"
     return x_expr, y_expr, enable_expr
 
 
 def generate_ffmpeg_command(video_path, output_path, interval=60,
-                            watermark_duration_seconds=3, crf=30,
+                            watermark_duration_seconds=3, crf=32,
                             fixed_watermark_enabled=True, fixed_watermark_pos="top-right",
                             dynamic_watermark_enabled=True,
                             format_type="h264", watermark_opacity=1.0,
                             fixed_watermark_path=None, dynamic_watermark_path=None,
                             fixed_watermark_width_ratio=None, dynamic_watermark_width_ratio=None,
                             encoder_threads=None, filter_threads=1,
-                            encoder_preset=None):
+                            encoder_preset=None, encoder_device="cpu",
+                            gpu_quality=32, gpu_preset="p4",
+                            sample_start=None, sample_duration=None):
     """
     生成带有水印的FFmpeg命令。
 
@@ -365,7 +375,8 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
         output_path = base + fmt["ext"]
 
     filter_complex_parts = []
-    input_files = f'-i "{video_path}"'
+    seek_args = f'-ss {float(sample_start):.6f} ' if sample_start is not None else ''
+    input_files = f'{seek_args}-i "{video_path}"'
     current_label = "0:v"
     label_seq = 1
     next_input_index = 1
@@ -408,6 +419,7 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
 
         x_expr, y_expr, enable_expr = _dynamic_watermark_expressions(
             interval, watermark_duration_seconds, width, height, dt_w, dt_h,
+            time_offset=float(sample_start or 0),
         )
         next_label = f"v{label_seq}"
         label_seq += 1
@@ -428,13 +440,26 @@ def generate_ffmpeg_command(video_path, output_path, interval=60,
         filter_args = '-map 0:v:0 '
 
     # 构建最终命令
-    video_codec_args = _get_video_codec_args(format_type, crf, encoder_preset)
+    video_codec_args = _get_video_codec_args(
+        format_type, crf, encoder_preset, encoder_device, gpu_quality, gpu_preset
+    )
+    if encoder_device == "nvidia":
+        encoder_thread_args = ''
+    elif format_type == "h265" and encoder_threads:
+        # libx265 maps FFmpeg's -threads to frame threads (limited to 16),
+        # not its worker pool. Keep the requested worker budget and let x265
+        # choose a valid number of concurrently encoded frames.
+        encoder_thread_args = f'-x265-params "pools={encoder_threads}:frame-threads=0" '
+    else:
+        encoder_thread_args = f'-threads {encoder_threads} ' if encoder_threads else ''
     ffmpeg_command = (
-        f'"{ffmpeg_exe}" -hide_banner -nostdin -nostats -progress pipe:2 -y {input_files} '
+        f'"{ffmpeg_exe}" -hide_banner -nostdin -nostats -progress pipe:2 -y '
+        f'{f"-threads {encoder_threads} " if encoder_device == "nvidia" and encoder_threads else ""}{input_files} '
         f'{filter_args}-map 0:a? '
         f'{video_codec_args} '
-        f'{f"-threads {encoder_threads} " if encoder_threads else ""}'
+        f'{encoder_thread_args}'
         f'-max_muxing_queue_size 1024 -c:a aac -b:a 128k '
+        f'{f"-t {float(sample_duration):.6f} " if sample_duration is not None else ""}'
         f'"{output_path}"'
     )
 

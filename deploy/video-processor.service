@@ -3,17 +3,32 @@ Description=Video Processor Web
 After=network.target
 
 [Service]
+Type=simple
+User=video-processor
+Group=video-processor
 WorkingDirectory=/data/video-processor-web
-EnvironmentFile=-/data/video-processor-data/video-processor.env
+EnvironmentFile=/etc/video-processor/video-processor.env
+Environment=VIDEO_PROCESSOR_ENV_FILE=/etc/video-processor/video-processor.env
+Environment=VIDEO_PROCESSOR_REQUIRE_AUTH=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
 Environment=VIDEO_PROCESSOR_ROOT=/data/video-processor-data
 Environment=VIDEO_PROCESSOR_FILE_RETENTION_DAYS=14
 Environment=VIDEO_PROCESSOR_RECORD_RETENTION_DAYS=90
 Environment=VIDEO_PROCESSOR_MIN_FREE_GB=20
 Environment=VIDEO_PROCESSOR_ARCHIVE_RETENTION_HOURS=24
 Environment=VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
-ExecStart=/data/video-processor-web/deploy/start-web.sh
-Restart=always
+ExecStart=/usr/bin/bash /data/video-processor-web/deploy/start-web.sh
+Restart=on-failure
 RestartSec=3
+TimeoutStopSec=60
+KillMode=control-group
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/data/video-processor-data
 
 [Install]
 WantedBy=multi-user.target

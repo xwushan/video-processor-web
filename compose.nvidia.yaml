@@ -1,0 +1,13 @@
+# Enable on an NVIDIA host with the driver and NVIDIA Container Toolkit installed.
+# docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
+services:
+  video-processor:
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VIDEO_PROCESSOR_GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]

@@ -1,170 +1,93 @@
 # 视频处理器 Web 版
 
-内网 Web 版默认部署目录：111
+面向内网批量视频处理，使用 FastAPI + FFmpeg 提供视频上传、固定/动态水印、CPU 与 NVIDIA GPU 编码、成品预估和下载。当前应用版本 1.3.8。
+
+## 部署入口
+
+完整说明见 **[部署与运维总览](deploy/README.md)**：
+
+| 部署方式 | 操作指南 |
+| --- | --- |
+| Ubuntu + 宝塔 Docker，导入镜像后编排 | [宝塔 Docker 部署](deploy/baota-ubuntu.md) |
+| Docker 命令行，在线构建或离线部署 | [Docker 部署](deploy/docker.md) |
+| Ubuntu 普通部署，不使用 Docker | [Python + FFmpeg + systemd](deploy/native-ubuntu.md) |
+| 宝塔普通 Python 网站 | [宝塔 Python 后端与网站代理](deploy/baota-native.md) |
+| 域名与 HTTPS | [Nginx 反向代理](deploy/reverse-proxy.md) |
+| 参数、备份、升级、回滚、迁移和排错 | [运维手册](deploy/operations.md) |
+
+公司 Ubuntu + 宝塔 Docker + RTX 3090 已由用户确认部署完成；宿主机驱动和容器内 H.264/H.265 NVENC 实际试编码通过，见 [现场复查记录](deploy/baota-recheck-20261015.md)。已有部署保留原项目、镜像标签、登录密码和数据卷。
+
+当前交付代码在 `codex/docker-gpu-release` 分支。新部署从该分支或已审核的固定提交取代码；PR 合并后可使用 main。
+
+## Docker 首次部署简例
+
+镜像包含 Python、FFmpeg/FFprobe 和运行依赖；GPU 另外需要宿主机 NVIDIA 驱动与 Container Toolkit。已有部署使用原配置更新，不重复执行首次部署流程。
 
 ```bash
-/data/video-processor-web
+git clone --branch codex/docker-gpu-release --single-branch https://github.com/xwushan/video-processor-web.git
+cd video-processor-web
+test -f .env || cp .env.example .env
 ```
 
-运行端口：
+编辑 `.env`，填写自己的 `VIDEO_PROCESSOR_AUTH_PASSWORD`，再在当前终端执行：
 
 ```bash
-8899
+chmod 600 .env
+export VIDEO_PROCESSOR_REVISION="$(git rev-parse HEAD)"
+export VIDEO_PROCESSOR_IMAGE_TAG="$VIDEO_PROCESSOR_REVISION"
+docker compose -f compose.yaml -f compose.production.yaml up -d --build --wait
 ```
 
-运行数据目录通过 `VIDEO_PROCESSOR_ROOT` 配置，推荐与源码分离：
+这是 CPU 生产配置，访问 `http://服务器IP:8899`。把这两个版本值记入 `.env`，以后仍使用同一镜像版本。GPU 部署使用 `compose.yaml`、`compose.nvidia.yaml`、`compose.production.yaml` 三个文件，后续管理命令始终保持同一组合；详见 [Docker 文档](deploy/docker.md)。Windows PowerShell 的环境变量写法不同，示例命令按 Linux Bash 编写。
 
-```text
-/data/video-processor-data/uploads
-/data/video-processor-data/outputs
-/data/video-processor-data/tmp
-/data/video-processor-data/watermarks
-/data/video-processor-data/video_processor.db
-```
+已经导入 `video-processor-web:1.3.8-787b7c9` 镜像的宝塔服务器，直接使用 [panel 编排与环境模板](deploy/README.md#模板文件)，无需重新构建源码。
 
-## Ubuntu 部署
+## 使用流程
+
+1. 选择视频或文件夹，确认待处理列表。
+2. 设置固定/动态水印，预览中可拖动固定水印；选择编码设备、格式、质量和策略。
+3. 点击“预估成品”，查看下方预计大小与实际试编码样片，按画质调整参数。
+4. 预估确认后点击“开始制作”，完成整批处理。处理页可暂停、继续或取消，记录页可单个或打包下载。
+
+超过 3 个视频时随机选 3 个试编码，列表只显示抽中的视频；调整参数沿用同组样本，正式制作补传其余视频。长视频在前、中、后各试编码 8 秒，不超过 24 秒的视频完整试编码。整批体积根据样本码率和时长推算，无法读取时长时使用抽样压缩比例；不同素材差异会扩大误差，参考范围不是大小保证。
+
+预估样片不进入处理记录，也不发送完成通知。开始制作、修改参数/视频、刷新、离开页面等操作会清理样片；清理请求未送达时，最后续期超过 10 分钟后由服务端回收，服务重启也清理遗留样片。续传所需原视频分块单独按上传会话期限保留。
+
+## 编码与资源
+
+- CPU CRF、GPU CQ **默认均为 32**，值越小通常画质越高、体积越大；两者数值不能直接等同。浏览器会保留用户之前修改的参数。
+- CPU 策略在速度和压缩效率之间取舍；GPU 默认均衡 p4，不同素材上策略差异可能较小，实际样片和总耗时更有参考价值。
+- 设备支持 auto、cpu、nvidia。auto 优先使用实际试编码成功的 GPU；执行中遇到 GPU 专属错误时使用独立 CPU 参数重新制作。明确选择 nvidia 时报告 GPU 错误。
+- GPU 负责 NVENC 编码，解码、水印和音频仍使用 CPU。H.265 的浏览器播放支持取决于客户端，可下载样片或选择 H.264。
+- GPU 并发从 1 路自动增加，默认安全上限 8；编码器、显存、GPU、CPU 或内存达到 80% 时停止新增，负载回落再增加。80% 是调度阈值，已运行任务可能超过它；监控缺失时保持单路。
+- 状态应按采集范围理解：Docker Desktop 有 Linux 虚拟机边界；Ubuntu Docker 的全局指标与宝塔显示的单容器占用也不同。磁盘空间按数据盘计算，GPU 指标可能包含其他 GPU 应用。
+
+环境变量、实际资源范围与故障处理见 [运维手册](deploy/operations.md)。
+
+## 数据与运行约定
+
+必须保持单个应用进程、一个 Uvicorn worker；当前任务队列在进程内，不能直接多副本共用 SQLite。生产配置要求非空登录密码，`/health` 保持公开供健康检查使用；密码、企业微信 Webhook 和实际环境文件不进入 Git。
+
+Docker 默认数据目录 `/data/video-processor`；普通部署示例 `/data/video-processor-data`。完整数据包含 SQLite、成品、水印、上传会话等，升级沿用原目录与应用内绝对路径。不同配置族的默认卷名可能不同，迁移前先核对。**不要使用 `docker compose down -v` 更新服务。**
+
+默认成品/源文件保留 14 天，历史记录 90 天，下载压缩包与未完成上传会话 24 小时；单个视频制作成功后会及时删除对应源文件。取消任务或删除记录会清理该任务关联文件。数据盘默认至少保留 20 GiB 空闲空间，另需预留整批原视频及成品的空间。
+
+备份完整数据与配置，不能只复制数据库；升级、回滚、普通部署与 Docker 迁移步骤见 [运维手册](deploy/operations.md)。
+
+## 验证与开发
 
 ```bash
-sudo mkdir -p /data/video-processor-web /data/video-processor-data
-sudo chown -R $USER:$USER /data/video-processor-web /data/video-processor-data
-
-cd /data/video-processor-web
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-web.txt
-
-sudo apt update
-sudo apt install -y ffmpeg
-
-VIDEO_PROCESSOR_ROOT=/data/video-processor-data uvicorn web_app.main:app --host 0.0.0.0 --port 8899 --workers 1
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+node --check web_app/static/app.js
+node --test tests/network.test.cjs
 ```
 
-浏览器访问：
-
-```text
-http://服务器IP:8899
-```
-
-如果宝塔启动命令里使用了：
+本地需要 Python 3.12、FFmpeg/FFprobe；也可使用隔离镜像测试阶段：
 
 ```bash
---env-file /data/video-processor-data/video-processor.env
+docker build --target test -t video-processor-web:test .
+docker run --rm video-processor-web:test
 ```
 
-需要先创建这个文件，否则 uvicorn 会直接启动失败：
-
-```bash
-sudo mkdir -p /data/video-processor-data
-sudo touch /data/video-processor-data/video-processor.env
-```
-
-也可以改用 `deploy/start-web.sh` 启动脚本；它会在 env 文件存在时自动加载，不存在时正常启动。
-
-## 保存时间
-
-默认文件保留 14 天，处理记录保留 90 天。
-
-可通过环境变量调整：
-
-```bash
-export VIDEO_PROCESSOR_FILE_RETENTION_DAYS=14
-export VIDEO_PROCESSOR_RECORD_RETENTION_DAYS=90
-export VIDEO_PROCESSOR_MAX_UPLOAD_MB=8192
-export VIDEO_PROCESSOR_MIN_FREE_GB=20
-export VIDEO_PROCESSOR_ARCHIVE_RETENTION_HOURS=24
-export VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
-```
-
-- 成品、上传源文件会按 `VIDEO_PROCESSOR_FILE_RETENTION_DAYS` 自动清理；处理记录按 `VIDEO_PROCESSOR_RECORD_RETENTION_DAYS` 清理。
-- 浏览器下载生成的压缩包默认只保留 24 小时，未完成的断点续传会话默认保留 24 小时。
-- 服务会始终预留 `VIDEO_PROCESSOR_MIN_FREE_GB` 的磁盘空间；上传、制作和打包前空间不足会直接提示，避免磁盘写满导致任务或数据库异常。
-
-文件过期后会自动清理上传文件和输出文件，处理记录仍会保留到记录过期时间；记录页会显示“文件已清理”，并隐藏下载入口。
-
-## 编码性能
-
-服务端固定使用 CPU 编码。处理页面可以选择编码策略：
-
-- 极速优先：最快，文件通常更大。
-- 速度优先：批量处理推荐，速度更快，文件可能略大。
-- 均衡：速度和体积折中。
-- 体积优先：输出通常更小，但更慢。
-- 高压缩：处理最慢，适合少量视频或特别在意体积的任务。
-
-也可以通过服务器环境变量设置默认/兜底 preset：
-
-```bash
-export VIDEO_PROCESSOR_H264_PRESET=veryfast
-export VIDEO_PROCESSOR_H265_PRESET=fast
-export VIDEO_PROCESSOR_MKV_PRESET=veryfast
-```
-
-可选值：`ultrafast`、`superfast`、`veryfast`、`faster`、`fast`、`medium`、`slow`、`slower`、`veryslow`、`placebo`。越靠前速度越快，文件可能更大；越靠后压缩更充分，但处理更慢。
-
-## 企业微信通知
-
-配置群机器人 Webhook 后，任务全部完成、存在失败或被取消时会发送通知。Webhook 是密钥，只应配置在服务器环境变量中，不能写入代码或提交到 Git：
-
-```bash
-export VIDEO_PROCESSOR_WECHAT_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=replace-with-your-key'
-export VIDEO_PROCESSOR_PUBLIC_URL='http://服务器IP:8899'
-```
-
-`VIDEO_PROCESSOR_PUBLIC_URL` 为可选项；设置后，完成通知会附带打开处理记录页面的链接。
-如果提示 webhook 缺少完整 key，请检查面板里的环境变量是否保存成了完整的 `...send?key=xxxx`。
-如果提示 `CERTIFICATE_VERIFY_FAILED`，程序会自动使用企业微信专用 TLS 兼容模式重试；仍建议在项目环境中重新执行 `pip install -r requirements-web.txt`，并确认 Ubuntu 已安装 `ca-certificates`。
-
-### 可选访问保护
-
-内网环境也可以开启浏览器基础认证。仅当设置密码时才会生效：
-
-```bash
-export VIDEO_PROCESSOR_AUTH_USER=admin
-export VIDEO_PROCESSOR_AUTH_PASSWORD='请设置一个独立强密码'
-```
-
-浏览器首次访问会显示页面内登录框；`/health` 健康检查不受影响。
-
-## 功能说明
-
-- 处理页面用于上传视频、设置水印、查看当前处理进度。
-- 处理记录页面用于查看历史任务、展开查看文件、单个下载或打包下载成品。
-- 处理记录支持删除；删除记录会同步删除服务器上的上传文件、成品文件、水印文件和临时压缩包。
-- 开始制作后，参数区域会显示锁定提示，避免制作中误改视频列表和水印参数。
-- 当前任务支持暂停、继续和取消；暂停会终止正在运行的 FFmpeg，继续时只处理未完成的视频。
-- 取消任务会终止正在运行的 FFmpeg，并删除本次任务的上传文件、输出文件、水印文件和临时压缩包。
-- 单个视频制作成功后，会立即删除对应的上传源视频；成品文件仍按保存时间保留。
-- 固定水印预览窗口常驻显示，可直接拖动水印设置自定义位置。
-
-## systemd 示例
-
-创建 `/etc/systemd/system/video-processor.service`：
-
-```ini
-[Unit]
-Description=Video Processor Web
-After=network.target
-
-[Service]
-WorkingDirectory=/data/video-processor-web
-EnvironmentFile=-/data/video-processor-data/video-processor.env
-Environment=VIDEO_PROCESSOR_ROOT=/data/video-processor-data
-Environment=VIDEO_PROCESSOR_FILE_RETENTION_DAYS=14
-Environment=VIDEO_PROCESSOR_RECORD_RETENTION_DAYS=90
-Environment=VIDEO_PROCESSOR_MIN_FREE_GB=20
-Environment=VIDEO_PROCESSOR_ARCHIVE_RETENTION_HOURS=24
-Environment=VIDEO_PROCESSOR_UPLOAD_SESSION_RETENTION_HOURS=24
-ExecStart=/data/video-processor-web/deploy/start-web.sh
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now video-processor
-```
+GitHub Actions 执行 Python/Node 回归、依赖漏洞审计、生产编排检查、普通部署配置检查、镜像构建及 CPU HTTP 全流程。空闲服务器可使用 [validate_docker.py](deploy/validate_docker.py) 验收真实编码与上传下载；参数与密码输入见 [正式发布手册](deploy/production-release.md)。历史实测见 [Docker 验证](deploy/docker-validation.md) 和 [上线复查](deploy/baota-recheck-20261015.md)。
